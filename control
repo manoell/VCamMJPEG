@@ -1,0 +1,9 @@
+Package: com.vcam.mjpeg
+Name: VCamMJPEG
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Substituição do feed da camera com transmissão MJPEG.
+Maintainer: Axelrod
+Author: Axelrod
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000)
