@@ -22,3 +22,4 @@
 .theos/obj/debug/arm64e/VCamMJPEG.dylib.dSYM/Contents/Resources/DWARF/VCamMJPEG.dylib
 .theos/obj/debug/VCamMJPEG.dylib
 .theos/packages/com.virtualcam.mjpegcameratweak-0.1.0
+/.theos

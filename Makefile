@@ -3,9 +3,9 @@ INSTALL_TARGET_PROCESSES = SpringBoard
 
 TWEAK_NAME = VCamMJPEG
 
-VCamMJPEG_FILES = Tweak.xm logger.m
+VCamMJPEG_FILES = Tweak.xm MJPEGReader.m MJPEGPreviewWindow.m VirtualCameraController.m logger.m
 VCamMJPEG_CFLAGS = -fobjc-arc
-VCamMJPEG_FRAMEWORKS = UIKit AVFoundation
+VCamMJPEG_FRAMEWORKS = UIKit AVFoundation CoreMedia CoreVideo CoreGraphics
 
 include $(THEOS)/makefiles/common.mk
 include $(THEOS_MAKE_PATH)/tweak.mk
