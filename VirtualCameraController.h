@@ -18,3 +18,8 @@
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer;
 
 @end
+
+// Interface para o substituidor de feed da câmera
+@interface VirtualCameraFeedReplacer : NSObject
++ (CMSampleBufferRef)replaceCameraSampleBuffer:(CMSampleBufferRef)originalBuffer withMJPEGBuffer:(CMSampleBufferRef)mjpegBuffer;
+@end

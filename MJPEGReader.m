@@ -7,6 +7,7 @@
 {
     dispatch_queue_t _processingQueue;
 }
+@property (nonatomic, assign) BOOL isReconnecting;
 @end
 
 @implementation MJPEGReader
@@ -29,6 +30,7 @@
         self.session = [NSURLSession sessionWithConfiguration:config delegate:self delegateQueue:nil];
         self.buffer = [NSMutableData data];
         self.isConnected = NO;
+        self.isReconnecting = NO;
         self.lastKnownResolution = CGSizeMake(1280, 720); // Resolução padrão
         
         // Criar a fila de processamento como variável de instância, não como propriedade
@@ -38,6 +40,16 @@
 }
 
 - (void)startStreamingFromURL:(NSURL *)url {
+    @synchronized (self) {
+        // Evitar múltiplas conexões simultâneas
+        if (self.isConnected || self.isReconnecting) {
+            writeLog(@"[MJPEG] Conexão já ativa ou reconectando, ignorando solicitação para: %@", url.absoluteString);
+            return;
+        }
+        
+        self.isReconnecting = YES;
+    }
+    
     writeLog(@"[MJPEG] Iniciando streaming de: %@", url.absoluteString);
     
     [self stopStreaming];
@@ -63,6 +75,11 @@
     [self.dataTask resume];
     
     writeLog(@"[MJPEG] Tarefa de streaming iniciada");
+    
+    // Timeout para redefinir o estado de reconexão após 5 segundos
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        self.isReconnecting = NO;
+    });
 }
 
 - (void)stopStreaming {
@@ -91,6 +108,7 @@
         
         // Redefinir estado
         self.isConnected = NO;
+        self.isReconnecting = NO;
     }
 }
 
@@ -102,6 +120,7 @@
         writeLog(@"[MJPEG] Conexão estabelecida com o servidor");
         
         self.isConnected = YES;
+        self.isReconnecting = NO;
         [self.buffer setLength:0];
         
         // Reset após 5 segundos
@@ -171,10 +190,10 @@
 }
 
 - (void)processJPEGData:(NSData *)jpegData {
-    // Adicionar log para saber se está recebendo frames
+    // Adicionar log para saber se está recebendo frames - limitado a cada 300 frames
     static int frameCount = 0;
     frameCount++;
-    if (frameCount % 30 == 0) {  // Log a cada 30 frames para não encher o log
+    if (frameCount % 300 == 0) {  // Log a cada 300 frames para não encher o log
         writeLog(@"[MJPEG] Processado frame #%d (%d bytes)", frameCount, (int)jpegData.length);
     }
     
@@ -199,11 +218,16 @@
         if (self.sampleBufferCallback) {
             CMSampleBufferRef sampleBuffer = [self createSampleBufferFromJPEGData:jpegData withSize:image.size];
             if (sampleBuffer) {
-                writeLog(@"[MJPEG] SampleBuffer criado e pronto para substituição");
+                // Limitando o log para não lotar a saída
+                if (frameCount % 300 == 0) {
+                    writeLog(@"[MJPEG] SampleBuffer criado e pronto para substituição (frame #%d)", frameCount);
+                }
                 self.sampleBufferCallback(sampleBuffer);
                 CFRelease(sampleBuffer);
             } else {
-                writeLog(@"[MJPEG] Falha ao criar sampleBuffer");
+                if (frameCount % 300 == 0) {
+                    writeLog(@"[MJPEG] Falha ao criar sampleBuffer (frame #%d)", frameCount);
+                }
             }
         } else {
             static BOOL loggedMissingSampleBufferCallback = NO;
@@ -348,6 +372,7 @@
     } else {
         writeLog(@"[MJPEG] Streaming concluído");
         self.isConnected = NO;
+        self.isReconnecting = NO;
     }
 }
 
