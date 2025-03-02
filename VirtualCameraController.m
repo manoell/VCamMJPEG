@@ -74,6 +74,13 @@
     }
     
     writeLog(@"[CAMERA] Iniciando captura virtual");
+    
+    // Inicializar a fila de processamento se não existir
+    if (!_processingQueue) {
+        _processingQueue = dispatch_queue_create("com.vcam.mjpeg.virtual-camera", DISPATCH_QUEUE_SERIAL);
+    }
+    
+    // Definir como ativo
     self.isActive = YES;
     writeLog(@"[CAMERA] Captura virtual iniciada com sucesso");
     
@@ -83,6 +90,14 @@
         writeLog(@"[CAMERA] MJPEGReader não está conectado, tentando conectar...");
         NSURL *url = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
         [reader startStreamingFromURL:url];
+    }
+    
+    // Configurar o callback do reader se ainda não foi configurado
+    if (!reader.sampleBufferCallback) {
+        __weak typeof(self) weakSelf = self;
+        reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
+            [weakSelf processSampleBuffer:sampleBuffer];
+        };
     }
 }
 
@@ -98,11 +113,10 @@
     CMSampleBufferRef result = NULL;
     
     @synchronized (self) {
-        if (_latestSampleBuffer) {
-            if (CMSampleBufferIsValid(_latestSampleBuffer)) {
-                result = (CMSampleBufferRef)CFRetain(_latestSampleBuffer);
-                writeLog(@"[CAMERA] Buffer disponível e válido para substituição");
-            }
+        if (_latestSampleBuffer && CMSampleBufferIsValid(_latestSampleBuffer)) {
+            // Aumentar a contagem de referência para o chamador
+            result = (CMSampleBufferRef)CFRetain(_latestSampleBuffer);
+            writeLog(@"[CAMERA] Buffer disponível e válido para substituição");
         }
     }
     
@@ -130,7 +144,7 @@
                 _latestSampleBuffer = NULL;
             }
             
-            // Armazenar novo buffer
+            // Retenha o buffer (aumente a contagem de referência)
             _latestSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
         }
     } @catch (NSException *exception) {

@@ -5,6 +5,10 @@
 #import "MJPEGPreviewWindow.h"
 #import "VirtualCameraController.h"
 
+// Estado global para controle
+static BOOL g_frameReplacementActive = NO;
+static dispatch_queue_t g_processingQueue;
+
 // Hook para AVCaptureSession para monitorar quando a câmera é iniciada
 %hook AVCaptureSession
 
@@ -92,8 +96,9 @@
         @try {
             // Aqui é a substituição do buffer
             VirtualCameraController *controller = [VirtualCameraController sharedInstance];
+            MJPEGReader *reader = [MJPEGReader sharedInstance];
             
-            if (controller.isActive) {
+            if (controller.isActive && reader.isConnected) {
                 // Tentar obter um buffer virtual
                 CMSampleBufferRef virtualBuffer = [controller getLatestSampleBuffer];
                 
@@ -107,7 +112,12 @@
                     
                     // Chamar o método original com nosso buffer substituído
                     %orig(output, virtualBuffer, connection);
+                    
+                    // Liberar o buffer após uso
                     CFRelease(virtualBuffer);
+                    
+                    // Definir o estado global
+                    g_frameReplacementActive = YES;
                     return;
                 }
             }

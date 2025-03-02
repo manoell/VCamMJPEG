@@ -224,6 +224,11 @@
 
 // Método para criar um CMSampleBuffer a partir de dados JPEG
 - (CMSampleBufferRef)createSampleBufferFromJPEGData:(NSData *)jpegData withSize:(CGSize)size {
+    if (!jpegData || jpegData.length == 0) {
+        writeLog(@"[MJPEG] Dados JPEG inválidos");
+        return NULL;
+    }
+    
     // Criar um CVPixelBuffer
     CVPixelBufferRef pixelBuffer = NULL;
     
@@ -304,25 +309,29 @@
     }
     
     // Criar referência de tempo para o sample buffer
-    CMSampleTimingInfo timing = {
-        .duration = CMTimeMake(1, 30), // 30 fps
-        .presentationTimeStamp = CMTimeMake(CACurrentMediaTime() * 1000, 1000),
-        .decodeTimeStamp = kCMTimeInvalid
-    };
+    CMSampleTimingInfo timing;
+    timing.duration = CMTimeMake(1, 30); // 30 fps
+    timing.presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000);
+    timing.decodeTimeStamp = kCMTimeInvalid;
     
     // Criar o sample buffer final
     CMSampleBufferRef sampleBuffer = NULL;
-    status = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault,
-                                                   pixelBuffer,
-                                                   formatDescription,
-                                                   &timing,
-                                                   &sampleBuffer);
+    status = CMSampleBufferCreateForImageBuffer(
+        kCFAllocatorDefault,
+        pixelBuffer,
+        true,
+        NULL,
+        NULL,
+        formatDescription,
+        &timing,
+        &sampleBuffer
+    );
     
     // Liberar recursos
     CFRelease(formatDescription);
     CVPixelBufferRelease(pixelBuffer);
     
-    if (status != noErr) {
+    if (status != noErr || !sampleBuffer) {
         writeLog(@"[MJPEG] Falha ao criar sample buffer: %d", status);
         return NULL;
     }
