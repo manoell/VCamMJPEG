@@ -27,14 +27,16 @@
         _isActive = NO;
         _latestSampleBuffer = NULL;
         
-        // Configurar callback para frames recebidos
+        // Configurar callback para frames MJPEG
         MJPEGReader *reader = [MJPEGReader sharedInstance];
+        
+        // Armazenar self fraco para evitar retenção circular
         __weak typeof(self) weakSelf = self;
         reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
             [weakSelf processSampleBuffer:sampleBuffer];
         };
         
-        writeLog(@"[CAMERA] VirtualCameraController inicializado");
+        writeLog(@"[CAMERA] VirtualCameraController inicializado e callback configurado");
     }
     return self;
 }
@@ -52,11 +54,36 @@
     }
 }
 
+- (BOOL)checkAndActivate {
+    // Se já estiver ativo, apenas retornar TRUE
+    if (self.isActive) {
+        return YES;
+    }
+    
+    // Ativar controlador
+    [self startCapturing];
+    
+    // Verificar se agora está ativo
+    return self.isActive;
+}
+
 - (void)startCapturing {
-    if (self.isActive) return;
+    if (self.isActive) {
+        writeLog(@"[CAMERA] Captura virtual já está ativa");
+        return;
+    }
     
     writeLog(@"[CAMERA] Iniciando captura virtual");
     self.isActive = YES;
+    writeLog(@"[CAMERA] Captura virtual iniciada com sucesso");
+    
+    // Verificar se o MJPEGReader está conectado
+    MJPEGReader *reader = [MJPEGReader sharedInstance];
+    if (!reader.isConnected) {
+        writeLog(@"[CAMERA] MJPEGReader não está conectado, tentando conectar...");
+        NSURL *url = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
+        [reader startStreamingFromURL:url];
+    }
 }
 
 - (void)stopCapturing {
@@ -72,8 +99,15 @@
     
     @synchronized (self) {
         if (_latestSampleBuffer) {
-            result = (CMSampleBufferRef)CFRetain(_latestSampleBuffer);
+            if (CMSampleBufferIsValid(_latestSampleBuffer)) {
+                result = (CMSampleBufferRef)CFRetain(_latestSampleBuffer);
+                writeLog(@"[CAMERA] Buffer disponível e válido para substituição");
+            }
         }
+    }
+    
+    if (!result) {
+        writeLog(@"[CAMERA] Sem buffer disponível para substituição");
     }
     
     return result;
@@ -82,13 +116,25 @@
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     if (!self.isActive) return;
     
-    // Armazenar o sample buffer mais recente
-    @synchronized (self) {
-        // Limpar o anterior antes de substituir
-        [self cleanupBuffer];
+    @try {
+        // Verificar se o buffer é válido
+        if (!sampleBuffer || !CMSampleBufferIsValid(sampleBuffer)) {
+            return;
+        }
         
-        // Armazenar novo buffer
-        _latestSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
+        // Armazenar o sample buffer mais recente com proteção
+        @synchronized (self) {
+            // Limpar o anterior com verificação
+            if (_latestSampleBuffer) {
+                CFRelease(_latestSampleBuffer);
+                _latestSampleBuffer = NULL;
+            }
+            
+            // Armazenar novo buffer
+            _latestSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
+        }
+    } @catch (NSException *exception) {
+        writeLog(@"[CAMERA] Erro ao processar sampleBuffer: %@", exception);
     }
 }
 

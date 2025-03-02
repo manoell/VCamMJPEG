@@ -8,8 +8,10 @@
 @property (nonatomic, strong) AVCaptureVideoDataOutput *videoOutput;
 @property (nonatomic, strong) AVCaptureConnection *videoConnection;
 @property (nonatomic, assign) BOOL isActive;
+@property (nonatomic, assign) BOOL debugMode;
 
 + (instancetype)sharedInstance;
+- (BOOL)checkAndActivate;
 - (void)startCapturing;
 - (void)stopCapturing;
 - (CMSampleBufferRef)getLatestSampleBuffer;

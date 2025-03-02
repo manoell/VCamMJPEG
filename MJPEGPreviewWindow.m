@@ -1,6 +1,7 @@
 #import "MJPEGPreviewWindow.h"
 #import "MJPEGReader.h"
 #import "logger.h"
+#import "VirtualCameraController.h"
 
 // URL do servidor MJPEG padrão
 static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
@@ -19,8 +20,8 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        // Configuração básica
-        self.windowLevel = UIWindowLevelAlert + 100;
+        // Configuração básica - reduzir nível da janela
+        self.windowLevel = UIWindowLevelNormal + 50; // Em vez de UIWindowLevelAlert + 100
         self.backgroundColor = [UIColor colorWithRed:0 green:0 blue:0.8 alpha:0.9];
         self.layer.cornerRadius = 12;
         self.clipsToBounds = YES;
@@ -100,9 +101,15 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
 
 - (void)show {
     dispatch_async(dispatch_get_main_queue(), ^{
+        // Verificar se estamos no processo certo
+        if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
+            writeLog(@"[UI] Tentativa de mostrar janela fora do SpringBoard!");
+            return;
+        }
+        
         self.hidden = NO;
         [self makeKeyAndVisible];
-        writeLog(@"[UI] MJPEGPreviewWindow mostrado");
+        writeLog(@"[UI] MJPEGPreviewWindow mostrado com segurança");
     });
 }
 
@@ -131,40 +138,54 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
 }
 
 - (void)connectButtonTapped {
-    if (!self.isConnected) {
-        writeLog(@"[UI] Botão conectar pressionado");
-        [self updateStatus:@"VirtualCam\nConectando..."];
-        
-        // Obter URL do servidor do campo de texto
-        NSString *serverUrl = self.serverTextField.text;
-        if (![serverUrl hasPrefix:@"http://"]) {
-            serverUrl = [@"http://" stringByAppendingString:serverUrl];
+    @try {
+        if (!self.isConnected) {
+            writeLog(@"[UI] Botão conectar pressionado");
+            [self updateStatus:@"VirtualCam\nConectando..."];
+            
+            NSString *serverUrl = self.serverTextField.text;
+            if (![serverUrl hasPrefix:@"http://"]) {
+                serverUrl = [@"http://" stringByAppendingString:serverUrl];
+            }
+            
+            // Criar URL e verificar validade
+            NSURL *url = [NSURL URLWithString:serverUrl];
+            if (!url) {
+                [self updateStatus:@"VirtualCam\nURL inválida"];
+                return;
+            }
+            
+            // Configurar apenas o necessário para preview
+            MJPEGReader *reader = [MJPEGReader sharedInstance];
+            __weak typeof(self) weakSelf = self;
+            reader.frameCallback = ^(UIImage *image) {
+                [weakSelf updatePreviewImage:image];
+            };
+            
+            // Iniciar streaming de forma protegida
+            @try {
+                [reader startStreamingFromURL:url];
+                self.isConnected = YES;
+                [self.connectButton setTitle:@"Desconectar" forState:UIControlStateNormal];
+            } @catch (NSException *e) {
+                writeLog(@"[UI] Erro ao iniciar streaming: %@", e);
+                [self updateStatus:@"VirtualCam\nErro ao conectar"];
+            }
+        } else {
+            // Desconectar de forma protegida
+            @try {
+                [[MJPEGReader sharedInstance] stopStreaming];
+                self.isConnected = NO;
+                [self.connectButton setTitle:@"Conectar" forState:UIControlStateNormal];
+                [self updateStatus:@"VirtualCam\nDesconectado"];
+                self.previewImageView.image = nil;
+                self.fpsLabel.text = @"FPS: --";
+            } @catch (NSException *e) {
+                writeLog(@"[UI] Erro ao parar streaming: %@", e);
+            }
         }
-        
-        // Configurar leitor MJPEG
-        MJPEGReader *reader = [MJPEGReader sharedInstance];
-        
-        // Configurar callback para frames recebidos
-        __weak typeof(self) weakSelf = self;
-        reader.frameCallback = ^(UIImage *image) {
-            [weakSelf updatePreviewImage:image];
-        };
-        
-        // Iniciar streaming
-        NSURL *url = [NSURL URLWithString:serverUrl];
-        [reader startStreamingFromURL:url];
-        
-        self.isConnected = YES;
-        [self.connectButton setTitle:@"Desconectar" forState:UIControlStateNormal];
-    } else {
-        // Desconectar
-        [[MJPEGReader sharedInstance] stopStreaming];
-        
-        self.isConnected = NO;
-        [self.connectButton setTitle:@"Conectar" forState:UIControlStateNormal];
-        [self updateStatus:@"VirtualCam\nDesconectado"];
-        self.previewImageView.image = nil;
-        self.fpsLabel.text = @"FPS: --";
+    } @catch (NSException *exception) {
+        writeLog(@"[UI] Erro geral em connectButtonTapped: %@", exception);
     }
 }
 

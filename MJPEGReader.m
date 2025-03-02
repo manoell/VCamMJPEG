@@ -1,5 +1,6 @@
 #import "MJPEGReader.h"
 #import "logger.h"
+#import "VirtualCameraController.h"
 
 @interface MJPEGReader ()
 // Usar um tipo normal em vez de property para dispatch_queue_t
@@ -22,8 +23,8 @@
 - (instancetype)init {
     if (self = [super init]) {
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-        config.timeoutIntervalForRequest = 10.0;
-        config.timeoutIntervalForResource = 30.0;
+        config.timeoutIntervalForRequest = 30.0;  // Aumentado de 10 para 30 segundos
+        config.timeoutIntervalForResource = 60.0; // Aumentado de 30 para 60 segundos
         
         self.session = [NSURLSession sessionWithConfiguration:config delegate:self delegateQueue:nil];
         self.buffer = [NSMutableData data];
@@ -43,6 +44,14 @@
     
     self.buffer = [NSMutableData data];
     
+    // IMPORTANTE: Garantir que o callback esteja configurado
+    if (!self.sampleBufferCallback) {
+        writeLog(@"[MJPEG] sampleBufferCallback não estava configurado. Configurando manualmente.");
+        self.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
+            [[VirtualCameraController sharedInstance] processSampleBuffer:sampleBuffer];
+        };
+    }
+    
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     [request setValue:@"multipart/x-mixed-replace" forHTTPHeaderField:@"Accept"];
     
@@ -57,18 +66,50 @@
 }
 
 - (void)stopStreaming {
-    if (self.dataTask) {
-        writeLog(@"[MJPEG] Parando streaming");
-        [self.dataTask cancel];
-        self.dataTask = nil;
+    @synchronized (self) {
+        if (self.dataTask) {
+            writeLog(@"[MJPEG] Parando streaming");
+            [self.dataTask cancel];
+            self.dataTask = nil;
+            self.isConnected = NO;
+        }
+    }
+}
+
+- (void)resetWithError:(NSError *)error {
+    writeLog(@"[MJPEG] Resetando leitor devido a erro: %@", error.localizedDescription);
+    
+    @synchronized (self) {
+        // Parar task atual
+        if (self.dataTask) {
+            [self.dataTask cancel];
+            self.dataTask = nil;
+        }
+        
+        // Limpar buffer
+        [self.buffer setLength:0];
+        
+        // Redefinir estado
         self.isConnected = NO;
     }
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
-    writeLog(@"[MJPEG] Conexão estabelecida com o servidor");
-    self.isConnected = YES;
-    [self.buffer setLength:0];
+    static BOOL isProcessingResponse = NO;
+    
+    if (!isProcessingResponse) {
+        isProcessingResponse = YES;
+        writeLog(@"[MJPEG] Conexão estabelecida com o servidor");
+        
+        self.isConnected = YES;
+        [self.buffer setLength:0];
+        
+        // Reset após 5 segundos
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            isProcessingResponse = NO;
+        });
+    }
+    
     completionHandler(NSURLSessionResponseAllow);
 }
 
@@ -76,11 +117,16 @@
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
     // Processar em fila separada para evitar bloqueio da rede
     dispatch_async(_processingQueue, ^{
-        // Adicionar novos dados ao buffer
-        [self.buffer appendData:data];
-        
-        // Processar dados recebidos - procurar por frames JPEG
-        [self processReceivedData];
+        @synchronized (self) {
+            // Verificar se a conexão ainda está ativa
+            if (!self.isConnected) return;
+            
+            // Adicionar novos dados ao buffer
+            [self.buffer appendData:data];
+            
+            // Processar dados recebidos - procurar por frames JPEG
+            [self processReceivedData];
+        }
     });
 }
 
@@ -125,6 +171,13 @@
 }
 
 - (void)processJPEGData:(NSData *)jpegData {
+    // Adicionar log para saber se está recebendo frames
+    static int frameCount = 0;
+    frameCount++;
+    if (frameCount % 30 == 0) {  // Log a cada 30 frames para não encher o log
+        writeLog(@"[MJPEG] Processado frame #%d (%d bytes)", frameCount, (int)jpegData.length);
+    }
+    
     // Criar imagem a partir dos dados JPEG
     UIImage *image = [UIImage imageWithData:jpegData];
     
@@ -146,8 +199,22 @@
         if (self.sampleBufferCallback) {
             CMSampleBufferRef sampleBuffer = [self createSampleBufferFromJPEGData:jpegData withSize:image.size];
             if (sampleBuffer) {
+                writeLog(@"[MJPEG] SampleBuffer criado e pronto para substituição");
                 self.sampleBufferCallback(sampleBuffer);
                 CFRelease(sampleBuffer);
+            } else {
+                writeLog(@"[MJPEG] Falha ao criar sampleBuffer");
+            }
+        } else {
+            static BOOL loggedMissingSampleBufferCallback = NO;
+            if (!loggedMissingSampleBufferCallback) {
+                writeLog(@"[MJPEG] sampleBufferCallback não configurado!");
+                loggedMissingSampleBufferCallback = YES;
+                
+                // Resetar flag após período para permitir novos logs se necessário
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    loggedMissingSampleBufferCallback = NO;
+                });
             }
         }
     } else {
@@ -267,12 +334,7 @@
     if (error) {
         if (error.code != NSURLErrorCancelled) { // Ignore cancelamento intencional
             writeLog(@"[MJPEG] Erro no streaming: %@", error);
-            self.isConnected = NO;
-            
-            // Tentar reconectar
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [self startStreamingFromURL:task.originalRequest.URL];
-            });
+            [self resetWithError:error];
         }
     } else {
         writeLog(@"[MJPEG] Streaming concluído");
