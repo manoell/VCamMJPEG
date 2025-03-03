@@ -7,7 +7,6 @@
 {
     dispatch_queue_t _processingQueue;
 }
-@property (nonatomic, assign) BOOL isReconnecting;
 @end
 
 @implementation MJPEGReader
@@ -32,6 +31,8 @@
         self.isConnected = NO;
         self.isReconnecting = NO;
         self.lastKnownResolution = CGSizeMake(1280, 720); // Resolução padrão
+        self.currentURL = nil;
+        self.lastReceivedSampleBuffer = NULL;
         
         // Criar a fila de processamento como variável de instância, não como propriedade
         _processingQueue = dispatch_queue_create("com.vcam.mjpeg.processing", DISPATCH_QUEUE_SERIAL);
@@ -40,46 +41,79 @@
 }
 
 - (void)startStreamingFromURL:(NSURL *)url {
-    @synchronized (self) {
-        // Evitar múltiplas conexões simultâneas
-        if (self.isConnected || self.isReconnecting) {
-            writeLog(@"[MJPEG] Conexão já ativa ou reconectando, ignorando solicitação para: %@", url.absoluteString);
+    static NSLock *connectionLock = nil;
+    static dispatch_once_t onceToken;
+    
+    dispatch_once(&onceToken, ^{
+        connectionLock = [[NSLock alloc] init];
+    });
+    
+    [connectionLock lock];
+    
+    @try {
+        // Se já estiver conectado à mesma URL, apenas ignore
+        if (self.isConnected && self.currentURL &&
+            [url.absoluteString isEqualToString:self.currentURL.absoluteString]) {
+            writeLog(@"[MJPEG] Já conectado ao servidor %@, ignorando solicitação duplicada", url.absoluteString);
+            [connectionLock unlock];
+            return;
+        }
+        
+        // Evitar múltiplas reconexões simultâneas
+        if (self.isReconnecting) {
+            writeLog(@"[MJPEG] Já está reconectando, ignorando solicitação para: %@", url.absoluteString);
+            [connectionLock unlock];
             return;
         }
         
         self.isReconnecting = YES;
+        
+        // Se estiver conectado a outra URL, desconecta primeiro
+        [self stopStreaming];
+        
+        // Armazena a URL atual
+        self.currentURL = url;
+        
+        writeLog(@"[MJPEG] Iniciando streaming de: %@", url.absoluteString);
+        
+        self.buffer = [NSMutableData data];
+        
+        // IMPORTANTE: Garantir que o callback esteja configurado
+        if (!self.sampleBufferCallback) {
+            writeLog(@"[MJPEG] sampleBufferCallback não estava configurado. Configurando manualmente.");
+            __weak typeof(self) weakSelf = self;
+            self.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
+                // Enviar o buffer para o controlador de câmera virtual
+                [[VirtualCameraController sharedInstance] processSampleBuffer:sampleBuffer];
+                
+                // Salvar o último frame recebido
+                if (weakSelf.lastReceivedSampleBuffer) {
+                    CFRelease(weakSelf.lastReceivedSampleBuffer);
+                }
+                weakSelf.lastReceivedSampleBuffer = sampleBuffer;
+                CFRetain(sampleBuffer);
+            };
+        }
+        
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+        [request setValue:@"multipart/x-mixed-replace" forHTTPHeaderField:@"Accept"];
+        [request setValue:@"keep-alive" forHTTPHeaderField:@"Connection"];
+        [request setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+        
+        self.dataTask = [self.session dataTaskWithRequest:request];
+        [self.dataTask resume];
+        
+        writeLog(@"[MJPEG] Tarefa de streaming iniciada");
+    } @catch (NSException *exception) {
+        writeLog(@"[MJPEG] Erro ao iniciar streaming: %@", exception.reason);
+    } @finally {
+        // Garantir que o estado de reconexão seja limpo após um tempo
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            self.isReconnecting = NO;
+        });
+        
+        [connectionLock unlock];
     }
-    
-    writeLog(@"[MJPEG] Iniciando streaming de: %@", url.absoluteString);
-    
-    [self stopStreaming];
-    
-    self.buffer = [NSMutableData data];
-    
-    // IMPORTANTE: Garantir que o callback esteja configurado
-    if (!self.sampleBufferCallback) {
-        writeLog(@"[MJPEG] sampleBufferCallback não estava configurado. Configurando manualmente.");
-        self.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
-            [[VirtualCameraController sharedInstance] processSampleBuffer:sampleBuffer];
-        };
-    }
-    
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [request setValue:@"multipart/x-mixed-replace" forHTTPHeaderField:@"Accept"];
-    
-    // Adicionar headers otimizados
-    [request setValue:@"keep-alive" forHTTPHeaderField:@"Connection"];
-    [request setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
-    
-    self.dataTask = [self.session dataTaskWithRequest:request];
-    [self.dataTask resume];
-    
-    writeLog(@"[MJPEG] Tarefa de streaming iniciada");
-    
-    // Timeout para redefinir o estado de reconexão após 5 segundos
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        self.isReconnecting = NO;
-    });
 }
 
 - (void)stopStreaming {
@@ -90,6 +124,20 @@
             self.dataTask = nil;
             self.isConnected = NO;
         }
+        
+        if (self.lastReceivedSampleBuffer) {
+            CFRelease(self.lastReceivedSampleBuffer);
+            self.lastReceivedSampleBuffer = NULL;
+        }
+    }
+}
+
+- (void)dealloc {
+    [self stopStreaming];
+    
+    if (self.lastReceivedSampleBuffer) {
+        CFRelease(self.lastReceivedSampleBuffer);
+        self.lastReceivedSampleBuffer = NULL;
     }
 }
 
@@ -109,6 +157,11 @@
         // Redefinir estado
         self.isConnected = NO;
         self.isReconnecting = NO;
+        
+        if (self.lastReceivedSampleBuffer) {
+            CFRelease(self.lastReceivedSampleBuffer);
+            self.lastReceivedSampleBuffer = NULL;
+        }
     }
 }
 

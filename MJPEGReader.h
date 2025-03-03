@@ -11,7 +11,10 @@
 @property (nonatomic, copy) void (^frameCallback)(UIImage *);
 @property (nonatomic, copy) void (^sampleBufferCallback)(CMSampleBufferRef);
 @property (nonatomic, assign) BOOL isConnected;
+@property (nonatomic, assign) BOOL isReconnecting;
 @property (nonatomic, assign) CGSize lastKnownResolution;
+@property (nonatomic, strong) NSURL *currentURL;
+@property (nonatomic, assign) CMSampleBufferRef lastReceivedSampleBuffer;
 
 + (instancetype)sharedInstance;
 - (void)startStreamingFromURL:(NSURL *)url;

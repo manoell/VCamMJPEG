@@ -6,7 +6,6 @@
 #import "VirtualCameraController.h"
 
 // Estado global para controle
-static BOOL g_frameReplacementActive = NO;
 static dispatch_queue_t g_processingQueue;
 
 // Hook para AVCaptureSession para monitorar quando a câmera é iniciada
@@ -47,36 +46,22 @@ static dispatch_queue_t g_processingQueue;
 %hook AVCaptureVideoDataOutput
 
 - (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
-    // Logar informações detalhadas
+    // Logar informações sobre o delegado
     writeLog(@"[HOOK] AVCaptureVideoDataOutput setSampleBufferDelegate chamado para %@", 
              sampleBufferDelegate ? NSStringFromClass([sampleBufferDelegate class]) : @"(null)");
     
-    // Se for NULL, apenas chamar o método original e não fazer mais nada
-    if (!sampleBufferDelegate) {
-        %orig;
-        return;
-    }
+    // Ativar o controlador
+    [[VirtualCameraController sharedInstance] startCapturing];
     
-    // Verificar se a queue também é válida
-    if (!sampleBufferCallbackQueue) {
-        writeLog(@"[HOOK] Aviso: queue de callback é null");
-        %orig;
-        return;
+    // Tentar conectar ao servidor MJPEG se necessário
+    MJPEGReader *reader = [MJPEGReader sharedInstance];
+    if (!reader.isConnected) {
+        NSURL *defaultURL = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
+        [reader startStreamingFromURL:defaultURL];
     }
     
     // Chamar o método original
     %orig;
-    
-    // Ativar o controlador com proteção contra erros
-    @try {
-        // Verificar se podemos ativar o controlador
-        VirtualCameraController *controller = [VirtualCameraController sharedInstance];
-        [controller startCapturing];
-        
-        writeLog(@"[HOOK] Controlador ativado em setSampleBufferDelegate");
-    } @catch (NSException *exception) {
-        writeLog(@"[HOOK] Erro ao ativar controlador: %@", exception);
-    }
 }
 
 %end
@@ -85,6 +70,9 @@ static dispatch_queue_t g_processingQueue;
 
 // Hook para o método que recebe os sample buffers da câmera
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    static int originalFrameCount = 0;
+    static int replacedFrameCount = 0;
+    
     // Primeiro verifique se este objeto responde ao método original
     if (![self respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
         %orig;
@@ -92,57 +80,59 @@ static dispatch_queue_t g_processingQueue;
     }
     
     // Verificar se é um output de vídeo e se todos os parâmetros são válidos
-    if (sampleBuffer && connection && (
-        [output isKindOfClass:%c(AVCaptureVideoDataOutput)] || 
-        [NSStringFromClass([output class]) containsString:@"VideoDataOutput"])
-       ) {
-        @try {
-            // Aqui é a substituição do buffer
-            VirtualCameraController *controller = [VirtualCameraController sharedInstance];
-            MJPEGReader *reader = [MJPEGReader sharedInstance];
-            
-            if (controller.isActive && reader.isConnected) {
-                // Tentar obter um buffer virtual
-                CMSampleBufferRef mjpegBuffer = [controller getLatestSampleBuffer];
+    if (sampleBuffer && connection) {
+        // Verificar se é um VideoDataOutput de forma mais geral
+        BOOL isVideoOutput = [output isKindOfClass:%c(AVCaptureVideoDataOutput)] || 
+                             [NSStringFromClass([output class]) containsString:@"VideoDataOutput"] ||
+                             [NSStringFromClass([output class]) containsString:@"Video"];
+        
+        if (isVideoOutput) {
+            @try {
+                // Verificações para debug
+                if (originalFrameCount++ % 300 == 0) {
+                    writeLog(@"[HOOK] Frame original #%d da câmera recebido na classe: %@", 
+                             originalFrameCount, NSStringFromClass([self class]));
+                }
                 
-                if (mjpegBuffer) {
-                    // Usar o método para criar um buffer compatível
-                    CMSampleBufferRef virtualBuffer = [VirtualCameraFeedReplacer 
-                        replaceCameraSampleBuffer:sampleBuffer 
-                        withMJPEGBuffer:mjpegBuffer];
+                // Verificar controlador e leitor
+                VirtualCameraController *controller = [VirtualCameraController sharedInstance];
+                MJPEGReader *reader = [MJPEGReader sharedInstance];
+                
+                // Se não estiver ativo, ative-o
+                if (!controller.isActive) {
+                    [controller startCapturing];
+                }
+                
+                // Se o reader não estiver conectado, conecte-o
+                if (!reader.isConnected) {
+                    NSURL *defaultURL = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
+                    [reader startStreamingFromURL:defaultURL];
+                }
+                
+                if (controller.isActive) {
+                    // Tentar obter um buffer virtual
+                    CMSampleBufferRef mjpegBuffer = [controller getLatestSampleBuffer];
                     
-                    if (virtualBuffer) {
-                        static int frameCount = 0;
-                        frameCount++;
-                        
-                        if (frameCount % 300 == 0) {
-                            writeLog(@"[HOOK] Substituindo frame da câmera #%d", frameCount);
+                    if (mjpegBuffer) {
+                        // Log para saber que estamos tentando substituir
+                        if (replacedFrameCount++ % 300 == 0) {
+                            writeLog(@"[HOOK] Substituindo frame da câmera #%d na classe: %@", 
+                                     replacedFrameCount, NSStringFromClass([self class]));
                         }
                         
                         // Chamar o método original com nosso buffer substituído
-                        %orig(output, virtualBuffer, connection);
+                        %orig(output, mjpegBuffer, connection);
                         
                         // Liberar o buffer após uso
-                        if (virtualBuffer != sampleBuffer) {
-                            CFRelease(virtualBuffer);
-                        }
-                        
-                        // Se o buffer MJPEG não for o mesmo que retornamos, libere-o também
-                        if (mjpegBuffer != virtualBuffer && mjpegBuffer != sampleBuffer) {
-                            CFRelease(mjpegBuffer);
-                        }
-                        
-                        // Definir o estado global
-                        g_frameReplacementActive = YES;
-                        return;
-                    } else {
-                        // Se falhou em criar o buffer virtual, liberar o mjpeg buffer
                         CFRelease(mjpegBuffer);
+                        return;
+                    } else if (originalFrameCount % 300 == 0) {
+                        writeLog(@"[HOOK] Sem buffer MJPEG disponível para substituir frame #%d", originalFrameCount);
                     }
                 }
+            } @catch (NSException *exception) {
+                writeLog(@"[HOOK] Erro ao processar frame: %@", exception);
             }
-        } @catch (NSException *exception) {
-            writeLog(@"[HOOK] Erro ao processar frame: %@", exception);
         }
     }
     
@@ -160,6 +150,10 @@ static dispatch_queue_t g_processingQueue;
         NSString *processName = [NSProcessInfo processInfo].processName;
         writeLog(@"[INIT] VirtualCam MJPEG carregado em processo: %@", processName);
         
+        // Inicialização única dos componentes principais
+        VirtualCameraController *controller = [VirtualCameraController sharedInstance];
+        MJPEGReader *reader = [MJPEGReader sharedInstance];
+        
         if ([processName isEqualToString:@"SpringBoard"]) {
             // Modo SpringBoard: Apenas UI
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -167,14 +161,6 @@ static dispatch_queue_t g_processingQueue;
                 [[MJPEGPreviewWindow sharedInstance] show];
             });
         } else {
-            // Abordagem universal: configurar controlador para todos os processos
-            // O hook será ativado automaticamente quando AVCaptureSession for utilizado
-            writeLog(@"[INIT] Configurando hooks universais para captura de câmera em: %@", processName);
-            
-            // Pre-inicializar componentes principais
-            VirtualCameraController *controller = [VirtualCameraController sharedInstance];
-            MJPEGReader *reader = [MJPEGReader sharedInstance];
-            
             // Observar notificações relacionadas à câmera para iniciar a captura quando necessário
             NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
             
@@ -183,37 +169,19 @@ static dispatch_queue_t g_processingQueue;
                                 object:nil 
                                  queue:[NSOperationQueue mainQueue] 
                             usingBlock:^(NSNotification *notification) {
-                if (!controller.isActive) {
-                    writeLog(@"[INIT] App se tornou ativo, configurando sistema de captura");
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        [controller startCapturing];
-                        
-                        // Iniciar conexão com servidor MJPEG se não estiver conectado
-                        if (!reader.isConnected) {
-                            writeLog(@"[CAMERA] Iniciando conexão automática com servidor MJPEG");
-                            NSURL *url = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
-                            [reader startStreamingFromURL:url];
-                        }
-                    });
-                }
+                [controller startCapturing];
             }];
             
-            // Inicializar logo para apps conhecidos que usam a câmera frequentemente
-            BOOL isCommonCameraApp = 
+            // Verificar apps conhecidos que usam a câmera frequentemente para ativar proativamente
+            BOOL isCameraApp = 
                 ([processName isEqualToString:@"Camera"] || 
                  [processName containsString:@"camera"] || 
                  [processName containsString:@"facetime"]);
                 
-            if (isCommonCameraApp) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (isCameraApp) {
+                writeLog(@"[INIT] Configurando hooks para app de câmera: %@", processName);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [controller startCapturing];
-                    writeLog(@"[CAMERA] Controlador ativado proativamente para app de câmera conhecido");
-                    
-                    // Iniciar conexão com servidor MJPEG
-                    if (!reader.isConnected) {
-                        NSURL *url = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
-                        [reader startStreamingFromURL:url];
-                    }
                 });
             }
         }
