@@ -28,7 +28,16 @@ O projeto está dividido em várias classes para facilitar a manutenção:
 1. **MJPEGReader**: Responsável pela conexão com o servidor MJPEG, recepção e processamento do stream
 2. **MJPEGPreviewWindow**: Gerencia a janela flutuante de preview e controles
 3. **VirtualCameraController**: Controla a substituição do feed da câmera nativa
-4. **Logger**: Sistema de logging para debug e monitoramento
+4. **GetFrame**: Componente central para gerenciar o armazenamento e a recuperação dos frames para substituição
+5. **Logger**: Sistema de logging para debug e monitoramento
+
+## Funcionamento
+1. O servidor MJPEG envia um fluxo constante de imagens JPEG
+2. O MJPEGReader captura e processa estas imagens
+3. As imagens são convertidas em CMSampleBuffers pelo componente GetFrame
+4. O Tweak intercepta chamadas da câmera nativa através de hooks em AVFoundation
+5. Os frames originais da câmera são substituídos pelo feed MJPEG
+6. O processo é totalmente transparente para o aplicativo que usa a câmera
 
 ## Requisitos
 - iOS 14.0 ou posterior
@@ -67,6 +76,12 @@ Se você não conseguir ver o stream no preview:
 - Verifique os logs para identificar possíveis erros
 - Tente reiniciar o servidor e reconectar o cliente
 
+Se a substituição da câmera não estiver funcionando:
+- Verifique se o stream está sendo recebido corretamente (visível no preview)
+- Confira se o aplicativo está usando a API de câmera padrão do iOS
+- Verifique os logs para erros de substituição do buffer
+- Reinicie o dispositivo iOS e tente novamente
+
 ## Estado do Desenvolvimento
 - [x] Recepção e processamento de streams MJPEG
 - [x] Interface de preview funcional
@@ -76,15 +91,12 @@ Se você não conseguir ver o stream no preview:
 - [ ] Seleção entre câmeras frontal/traseira
 - [ ] Configurações avançadas de qualidade e performance
 
-## Licença
-Este projeto está licenciado sob termos proprietários.
-Todos os direitos reservados.
-
 ## Histórico de Versões
 - **0.2.0 (Atual)**
   - Implementação dos hooks de AVFoundation
   - Substituição funcional do feed da câmera
   - Interface melhorada com configuração de servidor
+  - Introdução do componente GetFrame para gerenciamento centralizado de buffers
   - Melhorias na estabilidade e performance
 
 - **0.1.0 (Inicial)**
