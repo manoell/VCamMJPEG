@@ -86,18 +86,17 @@ Se a substituição da câmera não estiver funcionando:
 - [x] Recepção e processamento de streams MJPEG
 - [x] Interface de preview funcional
 - [x] Hooks no sistema de câmera do iOS
-- [x] Substituição de câmera em aplicativos nativos
+- [ ] Substituição de câmera em aplicativos nativos (em desenvolvimento)
 - [ ] Suporte para orientação variável (landscape/portrait)
 - [ ] Seleção entre câmeras frontal/traseira
 - [ ] Configurações avançadas de qualidade e performance
 
 ## Histórico de Versões
-- **0.2.0 (Atual)**
+- **0.2.0 (Em desenvolvimento)**
   - Implementação dos hooks de AVFoundation
-  - Substituição funcional do feed da câmera
-  - Interface melhorada com configuração de servidor
   - Introdução do componente GetFrame para gerenciamento centralizado de buffers
-  - Melhorias na estabilidade e performance
+  - Interface melhorada com configuração de servidor
+  - Correções de estabilidade
 
 - **0.1.0 (Inicial)**
   - Implementação inicial do cliente MJPEG
