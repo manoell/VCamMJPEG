@@ -1,3 +1,4 @@
+#import "GetFrame.h"
 #import "MJPEGReader.h"
 #import "logger.h"
 #import "VirtualCameraController.h"
@@ -275,6 +276,20 @@
                 if (frameCount % 300 == 0) {
                     writeLog(@"[MJPEG] SampleBuffer criado e pronto para substituição (frame #%d)", frameCount);
                 }
+                
+                // Armazenar o buffer tanto localmente quanto no GetFrame
+                @synchronized(self) {
+                    if (self.lastReceivedSampleBuffer) {
+                        CFRelease(self.lastReceivedSampleBuffer);
+                        self.lastReceivedSampleBuffer = NULL;
+                    }
+                    self.lastReceivedSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
+                }
+                
+                // Importante: enviar para o GetFrame para substituição global
+                [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
+                
+                // Chamar o callback original
                 self.sampleBufferCallback(sampleBuffer);
                 CFRelease(sampleBuffer);
             } else {
@@ -309,18 +324,19 @@
     // Criar um CVPixelBuffer
     CVPixelBufferRef pixelBuffer = NULL;
     
-    // Especificar propriedades do buffer
+    // Especificar propriedades do buffer para melhor compatibilidade
     NSDictionary *options = @{
         (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
         (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
-        (id)kCVPixelBufferMetalCompatibilityKey: @YES
+        (id)kCVPixelBufferMetalCompatibilityKey: @YES,
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{}  // Melhora a compatibilidade
     };
     
     // Criar pixel buffer vazio
     CVReturn status = CVPixelBufferCreate(kCFAllocatorDefault,
                                         size.width,
                                         size.height,
-                                        kCVPixelFormatType_32BGRA,
+                                        kCVPixelFormatType_32BGRA,  // Formato mais compatível
                                         (__bridge CFDictionaryRef)options,
                                         &pixelBuffer);
     
@@ -345,6 +361,7 @@
     
     // Obter o ponteiro para os dados do buffer
     void *baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer);
+    size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
     
     // Configurar contexto para desenhar a imagem no buffer
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
@@ -352,7 +369,7 @@
                                               size.width,
                                               size.height,
                                               8,
-                                              CVPixelBufferGetBytesPerRow(pixelBuffer),
+                                              bytesPerRow,
                                               colorSpace,
                                               kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
     CGColorSpaceRelease(colorSpace);
@@ -365,7 +382,7 @@
         return NULL;
     }
     
-    // Desenhar a imagem no contexto
+    // Desenhar a imagem no contexto com a orientação correta
     CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), cgImage);
     
     // Liberar recursos
@@ -385,10 +402,11 @@
         return NULL;
     }
     
-    // Criar referência de tempo para o sample buffer
+    // Criar referência de tempo mais precisa para o sample buffer
+    CMTime currentTime = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000);
     CMSampleTimingInfo timing;
     timing.duration = CMTimeMake(1, 30); // 30 fps
-    timing.presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000);
+    timing.presentationTimeStamp = currentTime;
     timing.decodeTimeStamp = kCMTimeInvalid;
     
     // Criar o sample buffer final
@@ -411,6 +429,13 @@
     if (status != noErr || !sampleBuffer) {
         writeLog(@"[MJPEG] Falha ao criar sample buffer: %d", status);
         return NULL;
+    }
+    
+    // Log para depuração
+    static int sampleBufferCount = 0;
+    if (sampleBufferCount++ % 300 == 0) {
+        writeLog(@"[MJPEG] SampleBuffer #%d criado com sucesso (dimensões: %.0f x %.0f)",
+                sampleBufferCount, size.width, size.height);
     }
     
     return sampleBuffer;

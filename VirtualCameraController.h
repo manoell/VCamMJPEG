@@ -15,6 +15,7 @@
 - (void)startCapturing;
 - (void)stopCapturing;
 - (CMSampleBufferRef)getLatestSampleBuffer;
+- (CMSampleBufferRef)getLatestSampleBufferForSubstitution;  // Novo método adicionado
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer;
 
 @end
