@@ -8,6 +8,7 @@
 
 + (instancetype)sharedInstance;
 + (CMSampleBufferRef)getCurrentFrame:(CMSampleBufferRef)inputBuffer replace:(BOOL)replace;
++ (void)cleanupResources;  // Novo método para liberar recursos
 - (UIImage *)getDisplayImage;
 - (void)processNewMJPEGFrame:(CMSampleBufferRef)sampleBuffer;
 

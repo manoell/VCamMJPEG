@@ -3,6 +3,11 @@
 #import "logger.h"
 #import "VirtualCameraController.h"
 
+// Indica se alguma instância já está conectada
+static BOOL gGlobalReaderConnected = NO;
+// URL do servidor atual
+static NSString *gCurrentServerURL = nil;
+
 @interface MJPEGReader ()
 // Usar um tipo normal em vez de property para dispatch_queue_t
 {
@@ -24,8 +29,8 @@
 - (instancetype)init {
     if (self = [super init]) {
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-        config.timeoutIntervalForRequest = 30.0;  // Aumentado de 10 para 30 segundos
-        config.timeoutIntervalForResource = 60.0; // Aumentado de 30 para 60 segundos
+        config.timeoutIntervalForRequest = 30.0;
+        config.timeoutIntervalForResource = 60.0;
         
         self.session = [NSURLSession sessionWithConfiguration:config delegate:self delegateQueue:nil];
         self.buffer = [NSMutableData data];
@@ -35,8 +40,18 @@
         self.currentURL = nil;
         self.lastReceivedSampleBuffer = NULL;
         
-        // Criar a fila de processamento como variável de instância, não como propriedade
+        // Criar a fila de processamento como variável de instância
         _processingQueue = dispatch_queue_create("com.vcam.mjpeg.processing", DISPATCH_QUEUE_SERIAL);
+        
+        // Verificar se alguma outra instância já está conectada
+        if (gGlobalReaderConnected) {
+            writeLog(@"[MJPEG] Outra instância já está conectada. Usando configuração global.");
+            if (gCurrentServerURL) {
+                writeLog(@"[MJPEG] Usando URL existente: %@", gCurrentServerURL);
+                self.currentURL = [NSURL URLWithString:gCurrentServerURL];
+                self.isConnected = YES;
+            }
+        }
     }
     return self;
 }
@@ -52,10 +67,11 @@
     [connectionLock lock];
     
     @try {
-        // Se já estiver conectado à mesma URL, apenas ignore
-        if (self.isConnected && self.currentURL &&
-            [url.absoluteString isEqualToString:self.currentURL.absoluteString]) {
-            writeLog(@"[MJPEG] Já conectado ao servidor %@, ignorando solicitação duplicada", url.absoluteString);
+        // Se já existe uma conexão global ativa, não iniciar nova
+        if (gGlobalReaderConnected && [url.absoluteString isEqualToString:gCurrentServerURL]) {
+            writeLog(@"[MJPEG] Já existe uma conexão global ativa para %@", url.absoluteString);
+            self.isConnected = YES;
+            self.currentURL = url;
             [connectionLock unlock];
             return;
         }
@@ -72,27 +88,21 @@
         // Se estiver conectado a outra URL, desconecta primeiro
         [self stopStreaming];
         
-        // Armazena a URL atual
+        // Armazena a URL atual globalmente
         self.currentURL = url;
+        gCurrentServerURL = url.absoluteString;
         
         writeLog(@"[MJPEG] Iniciando streaming de: %@", url.absoluteString);
         
         self.buffer = [NSMutableData data];
         
-        // IMPORTANTE: Garantir que o callback esteja configurado
+        // Garantir que o callback esteja configurado
         if (!self.sampleBufferCallback) {
-            writeLog(@"[MJPEG] sampleBufferCallback não estava configurado. Configurando manualmente.");
-            __weak typeof(self) weakSelf = self;
+            writeLog(@"[MJPEG] sampleBufferCallback não estava configurado. Configurando para GetFrame.");
+            // Removida a variável weakSelf não utilizada
             self.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
-                // Enviar o buffer para o controlador de câmera virtual
-                [[VirtualCameraController sharedInstance] processSampleBuffer:sampleBuffer];
-                
-                // Salvar o último frame recebido
-                if (weakSelf.lastReceivedSampleBuffer) {
-                    CFRelease(weakSelf.lastReceivedSampleBuffer);
-                }
-                weakSelf.lastReceivedSampleBuffer = sampleBuffer;
-                CFRetain(sampleBuffer);
+                // Enviar o buffer para GetFrame
+                [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
             };
         }
         
@@ -104,6 +114,7 @@
         self.dataTask = [self.session dataTaskWithRequest:request];
         [self.dataTask resume];
         
+        gGlobalReaderConnected = YES;
         writeLog(@"[MJPEG] Tarefa de streaming iniciada");
     } @catch (NSException *exception) {
         writeLog(@"[MJPEG] Erro ao iniciar streaming: %@", exception.reason);
@@ -124,6 +135,8 @@
             [self.dataTask cancel];
             self.dataTask = nil;
             self.isConnected = NO;
+            gGlobalReaderConnected = NO;
+            gCurrentServerURL = nil;
         }
         
         if (self.lastReceivedSampleBuffer) {
@@ -158,6 +171,7 @@
         // Redefinir estado
         self.isConnected = NO;
         self.isReconnecting = NO;
+        gGlobalReaderConnected = NO;
         
         if (self.lastReceivedSampleBuffer) {
             CFRelease(self.lastReceivedSampleBuffer);
@@ -175,6 +189,7 @@
         
         self.isConnected = YES;
         self.isReconnecting = NO;
+        gGlobalReaderConnected = YES;
         [self.buffer setLength:0];
         
         // Reset após 5 segundos
@@ -210,23 +225,27 @@
     BOOL foundJPEGStart = NO;
     NSUInteger frameStart = 0;
     
-    // Procurar o início e fim do JPEG
+    // Procurar o início e fim do JPEG de forma mais robusta
     for (NSUInteger i = 0; i < length - 1; i++) {
-        if (bytes[i] == 0xFF && bytes[i+1] == 0xD8) { // SOI marker
+        // Detectar o início do JPEG (SOI marker: FF D8)
+        if (bytes[i] == 0xFF && bytes[i+1] == 0xD8) {
             frameStart = i;
             foundJPEGStart = YES;
         }
-        else if (foundJPEGStart && bytes[i] == 0xFF && bytes[i+1] == 0xD9) { // EOI marker
-            NSUInteger frameEnd = i + 2;
+        // Detectar o fim do JPEG (EOI marker: FF D9) apenas se já encontramos o início
+        else if (foundJPEGStart && bytes[i] == 0xFF && bytes[i+1] == 0xD9) {
+            NSUInteger frameEnd = i + 2; // Incluir o marcador EOI
+            
+            // Extrair os dados do JPEG completo
             NSData *jpegData = [self.buffer subdataWithRange:NSMakeRange(frameStart, frameEnd - frameStart)];
             
             // Processar o frame
             [self processJPEGData:jpegData];
             
-            // Remover dados processados
+            // Remover dados processados do buffer
             [self.buffer replaceBytesInRange:NSMakeRange(0, frameEnd) withBytes:NULL length:0];
             
-            // Reiniciar a busca
+            // Resetar para continuar procurando
             i = 0;
             length = self.buffer.length;
             bytes = (const uint8_t *)self.buffer.bytes;
@@ -238,79 +257,103 @@
     
     // Proteção para buffer muito grande sem frame completo
     if (self.buffer.length > 1024 * 1024) { // 1MB
-        writeLog(@"[MJPEG] Buffer muito grande, resetando");
-        [self.buffer setLength:0];
+        static BOOL loggedBufferReset = NO;
+        if (!loggedBufferReset) {
+            writeLog(@"[MJPEG] Buffer muito grande sem frame completo, resetando (1MB)");
+            loggedBufferReset = YES;
+            
+            // Resetar após 5 segundos para permitir mais logs se ocorrer novamente
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                loggedBufferReset = NO;
+            });
+        }
+        
+        // Manter até 8KB no início do buffer por segurança, caso esteja no meio de um frame
+        if (self.buffer.length > 8192) {
+            [self.buffer replaceBytesInRange:NSMakeRange(8192, self.buffer.length - 8192) withBytes:NULL length:0];
+        } else {
+            [self.buffer setLength:0];
+        }
     }
 }
 
 - (void)processJPEGData:(NSData *)jpegData {
-    // Adicionar log para saber se está recebendo frames - limitado a cada 300 frames
-    static int frameCount = 0;
-    frameCount++;
-    if (frameCount % 300 == 0) {  // Log a cada 300 frames para não encher o log
-        writeLog(@"[MJPEG] Processado frame #%d (%d bytes)", frameCount, (int)jpegData.length);
-    }
-    
-    // Criar imagem a partir dos dados JPEG
-    UIImage *image = [UIImage imageWithData:jpegData];
-    
-    if (image) {
-        // Atualizar resolução conhecida
-        if (!CGSizeEqualToSize(image.size, self.lastKnownResolution)) {
-            self.lastKnownResolution = image.size;
-            writeLog(@"[MJPEG] Nova resolução detectada: %.0f x %.0f", image.size.width, image.size.height);
+    @autoreleasepool {
+        // Adicionar log para saber se está recebendo frames - limitado a cada 300 frames
+        static int frameCount = 0;
+        frameCount++;
+        if (frameCount % 300 == 0) {  // Log a cada 300 frames para não encher o log
+            writeLog(@"[MJPEG] Processado frame #%d (%d bytes)", frameCount, (int)jpegData.length);
         }
         
-        // Chamar callback de frame se existir (para preview)
-        if (self.frameCallback) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self.frameCallback(image);
-            });
-        }
+        // Criar imagem a partir dos dados JPEG
+        UIImage *image = [UIImage imageWithData:jpegData];
         
-        // Converter para CMSampleBuffer para uso com AVFoundation
-        if (self.sampleBufferCallback) {
-            CMSampleBufferRef sampleBuffer = [self createSampleBufferFromJPEGData:jpegData withSize:image.size];
-            if (sampleBuffer) {
-                // Limitando o log para não lotar a saída
-                if (frameCount % 300 == 0) {
-                    writeLog(@"[MJPEG] SampleBuffer criado e pronto para substituição (frame #%d)", frameCount);
-                }
-                
-                // Armazenar o buffer tanto localmente quanto no GetFrame
-                @synchronized(self) {
-                    if (self.lastReceivedSampleBuffer) {
-                        CFRelease(self.lastReceivedSampleBuffer);
-                        self.lastReceivedSampleBuffer = NULL;
-                    }
-                    self.lastReceivedSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
-                }
-                
-                // Importante: enviar para o GetFrame para substituição global
-                [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
-                
-                // Chamar o callback original
-                self.sampleBufferCallback(sampleBuffer);
-                CFRelease(sampleBuffer);
-            } else {
-                if (frameCount % 300 == 0) {
-                    writeLog(@"[MJPEG] Falha ao criar sampleBuffer (frame #%d)", frameCount);
-                }
+        if (image) {
+            // Atualizar resolução conhecida
+            if (!CGSizeEqualToSize(image.size, self.lastKnownResolution)) {
+                self.lastKnownResolution = image.size;
+                writeLog(@"[MJPEG] Nova resolução detectada: %.0f x %.0f", image.size.width, image.size.height);
             }
-        } else {
-            static BOOL loggedMissingSampleBufferCallback = NO;
-            if (!loggedMissingSampleBufferCallback) {
-                writeLog(@"[MJPEG] sampleBufferCallback não configurado!");
-                loggedMissingSampleBufferCallback = YES;
-                
-                // Resetar flag após período para permitir novos logs se necessário
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    loggedMissingSampleBufferCallback = NO;
+            
+            // Chamar callback de frame se existir (para preview)
+            if (self.frameCallback) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.frameCallback(image);
                 });
             }
+            
+            // Converter para CMSampleBuffer para uso com AVFoundation - MÉTODO CRÍTICO
+            @try {
+                CMSampleBufferRef sampleBuffer = [self createSampleBufferFromJPEGData:jpegData withSize:image.size];
+                if (sampleBuffer) {
+                    // Limitando o log para não lotar a saída
+                    if (frameCount % 300 == 0) {
+                        writeLog(@"[MJPEG] SampleBuffer criado e pronto para substituição (frame #%d)", frameCount);
+                    }
+                    
+                    // Verificação extra de segurança
+                    if (CMSampleBufferIsValid(sampleBuffer)) {
+                        // Armazenar o buffer tanto localmente quanto no GetFrame
+                        @synchronized(self) {
+                            if (self.lastReceivedSampleBuffer) {
+                                CFRelease(self.lastReceivedSampleBuffer);
+                                self.lastReceivedSampleBuffer = NULL;
+                            }
+                            self.lastReceivedSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
+                        }
+                        
+                        // CRÍTICO: Enviar para o GetFrame para substituição global
+                        [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
+                        
+                        // Chamar o callback original - com cópia do buffer
+                        if (self.sampleBufferCallback) {
+                            CMSampleBufferRef callbackBuffer = NULL;
+                            OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, sampleBuffer, &callbackBuffer);
+                            
+                            if (status == noErr && callbackBuffer != NULL) {
+                                self.sampleBufferCallback(callbackBuffer);
+                                CFRelease(callbackBuffer);
+                            }
+                        }
+                        
+                        CFRelease(sampleBuffer);
+                    } else {
+                        writeLog(@"[MJPEG] SampleBuffer gerado não é válido (frame #%d)", frameCount);
+                        CFRelease(sampleBuffer);
+                    }
+                } else {
+                    if (frameCount % 300 == 0) {
+                        writeLog(@"[MJPEG] Falha ao criar sampleBuffer (frame #%d)", frameCount);
+                    }
+                }
+            } @catch (NSException *e) {
+                writeLog(@"[MJPEG] Exceção ao processar sampleBuffer: %@", e);
+            }
+            
+        } else {
+            writeLog(@"[MJPEG] Falha ao criar imagem a partir dos dados JPEG");
         }
-    } else {
-        writeLog(@"[MJPEG] Falha ao criar imagem a partir dos dados JPEG");
     }
 }
 
@@ -382,7 +425,7 @@
         return NULL;
     }
     
-    // Desenhar a imagem no contexto com a orientação correta
+    // Desenhar a imagem no contexto com a orientação correta - ajuste importante
     CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), cgImage);
     
     // Liberar recursos
@@ -402,11 +445,10 @@
         return NULL;
     }
     
-    // Criar referência de tempo mais precisa para o sample buffer
-    CMTime currentTime = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000);
+    // Criar uma referência de tempo precisa para o sample buffer
     CMSampleTimingInfo timing;
     timing.duration = CMTimeMake(1, 30); // 30 fps
-    timing.presentationTimeStamp = currentTime;
+    timing.presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000);
     timing.decodeTimeStamp = kCMTimeInvalid;
     
     // Criar o sample buffer final
@@ -451,6 +493,7 @@
         writeLog(@"[MJPEG] Streaming concluído");
         self.isConnected = NO;
         self.isReconnecting = NO;
+        gGlobalReaderConnected = NO;
     }
 }
 

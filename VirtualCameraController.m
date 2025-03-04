@@ -1,11 +1,14 @@
 #import "VirtualCameraController.h"
 #import "MJPEGReader.h"
 #import "logger.h"
+#import "GetFrame.h"
+
+// Variável global para rastrear se a captura está ativa em todo o sistema
+static BOOL gCaptureSystemActive = NO;
 
 @interface VirtualCameraController ()
 {
-    // Usar variáveis de instância em vez de propriedades para tipos C
-    CMSampleBufferRef _latestSampleBuffer;
+    // Usar variáveis de instância para tipos C
     dispatch_queue_t _processingQueue;
     
     // Contador para limitar logs
@@ -28,18 +31,20 @@
     if (self = [super init]) {
         _processingQueue = dispatch_queue_create("com.vcam.mjpeg.virtual-camera", DISPATCH_QUEUE_SERIAL);
         _isActive = NO;
-        _latestSampleBuffer = NULL;
         _debugMode = YES;
         _frameCounter = 0;
         
-        // Configurar callback para frames MJPEG
-        MJPEGReader *reader = [MJPEGReader sharedInstance];
-        
-        // Armazenar self fraco para evitar retenção circular
-        __weak typeof(self) weakSelf = self;
-        reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
-            [weakSelf processSampleBuffer:sampleBuffer];
-        };
+        // Configurar callbacks apenas se não estivermos no SpringBoard
+        if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
+            // Configurar callback para frames MJPEG
+            MJPEGReader *reader = [MJPEGReader sharedInstance];
+            
+            // Armazenar self fraco para evitar retenção circular
+            __weak typeof(self) weakSelf = self;
+            reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
+                [weakSelf processSampleBuffer:sampleBuffer];
+            };
+        }
         
         writeLog(@"[CAMERA] VirtualCameraController inicializado e callback configurado");
     }
@@ -47,16 +52,7 @@
 }
 
 - (void)dealloc {
-    [self cleanupBuffer];
-}
-
-- (void)cleanupBuffer {
-    @synchronized (self) {
-        if (_latestSampleBuffer) {
-            CFRelease(_latestSampleBuffer);
-            _latestSampleBuffer = NULL;
-        }
-    }
+    [self stopCapturing];
 }
 
 - (BOOL)checkAndActivate {
@@ -73,6 +69,14 @@
 }
 
 - (void)startCapturing {
+    // Verificar se estamos no SpringBoard - limitar funcionalidade
+    BOOL isSpringBoard = [[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"];
+    
+    if (isSpringBoard) {
+        writeLog(@"[CAMERA] Detectado SpringBoard - modo limitado de operação");
+        return;
+    }
+    
     if (self.isActive) {
         writeLog(@"[CAMERA] Captura virtual já está ativa");
         return;
@@ -85,7 +89,8 @@
         _processingQueue = dispatch_queue_create("com.vcam.mjpeg.virtual-camera", DISPATCH_QUEUE_SERIAL);
     }
     
-    // Definir como ativo
+    // Definir como ativo globalmente
+    gCaptureSystemActive = YES;
     self.isActive = YES;
     writeLog(@"[CAMERA] Captura virtual iniciada com sucesso");
     
@@ -97,7 +102,7 @@
         [reader startStreamingFromURL:url];
     }
     
-    // Configurar o callback do reader se ainda não foi configurado
+    // Garantir que o callback esteja configurado
     if (!reader.sampleBufferCallback) {
         __weak typeof(self) weakSelf = self;
         reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
@@ -111,88 +116,38 @@
     
     writeLog(@"[CAMERA] Parando captura virtual");
     self.isActive = NO;
-    [self cleanupBuffer];
+    gCaptureSystemActive = NO;
+    
+    // Vamos também limpar a instância GetFrame para liberar buffers
+    [GetFrame cleanupResources];
 }
 
+// Método para obter o latest sample buffer (implementado para compatibilidade)
 - (CMSampleBufferRef)getLatestSampleBuffer {
-    CMSampleBufferRef result = NULL;
+    static int callCount = 0;
     
-    @synchronized (self) {
-        if (_latestSampleBuffer && CMSampleBufferIsValid(_latestSampleBuffer)) {
-            // Aumentar a contagem de referência para o chamador
-            result = (CMSampleBufferRef)CFRetain(_latestSampleBuffer);
-            
-            if (_debugMode && (++_frameCounter % 100 == 0)) {
-                writeLog(@"[CAMERA] Buffer #%d disponível e válido para substituição", _frameCounter);
-            }
-        } else {
-            // Se não houver buffer válido, vamos tentar criar um novo
-            MJPEGReader *reader = [MJPEGReader sharedInstance];
-            if (reader.isConnected) {
-                if (_debugMode) {
-                    writeLog(@"[CAMERA] Solicitando novo frame para substituição");
-                }
-                // Aqui você pode implementar uma forma de forçar a requisição de um novo frame
-            }
-        }
+    // Log limitado
+    if (++callCount % 200 == 0) {
+        writeLog(@"[CAMERA] getLatestSampleBuffer chamado %d vezes", callCount);
     }
     
-    // Limitar logs de erros
-    if (!result && _debugMode && (++_frameCounter % 100 == 0)) {
-        writeLog(@"[CAMERA] Sem buffer disponível para substituição (ocorrência #%d)", _frameCounter);
-    }
-    
-    return result;
+    // Usar o GetFrame para obter o buffer atual
+    return [GetFrame getCurrentFrame:NULL replace:NO];
 }
 
-// Implementação específica para substituição de câmera - baseada no GetFrame::getCurrentFrame__
+// Implementação específica para substituição de câmera
 - (CMSampleBufferRef)getLatestSampleBufferForSubstitution {
     static int callCount = 0;
     
     // Log menos frequente
-    if (++callCount % 100 == 0) {
+    if (++callCount % 300 == 0) {
         writeLog(@"[CAMERA] getLatestSampleBufferForSubstitution chamado #%d", callCount);
     }
     
-    // Primeira opção: usar o buffer armazenado
-    CMSampleBufferRef result = NULL;
-    
-    @synchronized (self) {
-        if (_latestSampleBuffer && CMSampleBufferIsValid(_latestSampleBuffer)) {
-            result = (CMSampleBufferRef)CFRetain(_latestSampleBuffer);
-            if (callCount % 100 == 0) {
-                writeLog(@"[CAMERA] Usando _latestSampleBuffer armazenado");
-            }
-            return result;
-        }
-    }
-    
-    // Segunda opção: usar o último buffer do MJPEGReader
-    MJPEGReader *reader = [MJPEGReader sharedInstance];
-    if (reader.lastReceivedSampleBuffer && CMSampleBufferIsValid(reader.lastReceivedSampleBuffer)) {
-        result = (CMSampleBufferRef)CFRetain(reader.lastReceivedSampleBuffer);
-        if (callCount % 100 == 0) {
-            writeLog(@"[CAMERA] Usando lastReceivedSampleBuffer do MJPEGReader");
-        }
-        return result;
-    }
-    
-    // Tentar obter um novo frame diretamente
-    if (reader.isConnected) {
-        // Aqui podemos tentar forçar uma captura imediata se necessário
-        if (callCount % 300 == 0) {
-            writeLog(@"[CAMERA] Tentando obter novo frame diretamente");
-        }
-    }
-    
-    if (!result && callCount % 300 == 0) {
-        writeLog(@"[CAMERA] Nenhum buffer disponível para substituição");
-    }
-    
-    return NULL;
+    // Usar o GetFrame para obter o buffer para substituição
+    return [GetFrame getCurrentFrame:NULL replace:YES];
 }
 
-// Método principal corrigido para garantir que os frames sejam processados corretamente
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     if (!self.isActive) return;
     
@@ -202,49 +157,41 @@
             return;
         }
         
-        // Armazenar o sample buffer mais recente com proteção
-        @synchronized (self) {
-            // Limpar o anterior com verificação
-            if (_latestSampleBuffer) {
-                CFRelease(_latestSampleBuffer);
-                _latestSampleBuffer = NULL;
+        // Enviar para o GetFrame para armazenamento e uso na substituição
+        [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
+        
+        // Log periódico
+        if (_debugMode && (++_frameCounter % 300 == 0)) {
+            writeLog(@"[CAMERA] Frame MJPEG #%d processado pelo VirtualCameraController", _frameCounter);
+            
+            // Debug info - formato do buffer
+            CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
+            if (formatDesc) {
+                FourCharCode mediaType = CMFormatDescriptionGetMediaType(formatDesc);
+                FourCharCode mediaSubType = CMFormatDescriptionGetMediaSubType(formatDesc);
+                char typeStr[5] = {0};
+                char subTypeStr[5] = {0};
+                
+                // Convertendo FourCharCode para string legível
+                typeStr[0] = (char)((mediaType >> 24) & 0xFF);
+                typeStr[1] = (char)((mediaType >> 16) & 0xFF);
+                typeStr[2] = (char)((mediaType >> 8) & 0xFF);
+                typeStr[3] = (char)(mediaType & 0xFF);
+                
+                subTypeStr[0] = (char)((mediaSubType >> 24) & 0xFF);
+                subTypeStr[1] = (char)((mediaSubType >> 16) & 0xFF);
+                subTypeStr[2] = (char)((mediaSubType >> 8) & 0xFF);
+                subTypeStr[3] = (char)(mediaSubType & 0xFF);
+                
+                writeLog(@"[CAMERA] Media Type: %s, SubType: %s", typeStr, subTypeStr);
             }
             
-            // Retenha o buffer (aumente a contagem de referência)
-            _latestSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
-            
-            if (_debugMode && (++_frameCounter % 300 == 0)) {
-                writeLog(@"[CAMERA] Novo frame MJPEG processado e armazenado (#%d)", _frameCounter);
-                
-                // Detalhes do tipo de buffer para depuração
-                CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
-                if (formatDesc) {
-                    FourCharCode mediaType = CMFormatDescriptionGetMediaType(formatDesc);
-                    FourCharCode mediaSubType = CMFormatDescriptionGetMediaSubType(formatDesc);
-                    char typeStr[5] = {0};
-                    char subTypeStr[5] = {0};
-                    
-                    // Convertendo FourCharCode para string legível
-                    typeStr[0] = (char)((mediaType >> 24) & 0xFF);
-                    typeStr[1] = (char)((mediaType >> 16) & 0xFF);
-                    typeStr[2] = (char)((mediaType >> 8) & 0xFF);
-                    typeStr[3] = (char)(mediaType & 0xFF);
-                    
-                    subTypeStr[0] = (char)((mediaSubType >> 24) & 0xFF);
-                    subTypeStr[1] = (char)((mediaSubType >> 16) & 0xFF);
-                    subTypeStr[2] = (char)((mediaSubType >> 8) & 0xFF);
-                    subTypeStr[3] = (char)(mediaSubType & 0xFF);
-                    
-                    writeLog(@"[CAMERA] Media Type: %s, SubType: %s", typeStr, subTypeStr);
-                }
-                
-                // Log de dimensões
-                CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-                if (imageBuffer) {
-                    size_t width = CVPixelBufferGetWidth(imageBuffer);
-                    size_t height = CVPixelBufferGetHeight(imageBuffer);
-                    writeLog(@"[CAMERA] Frame dimensões: %zu x %zu", width, height);
-                }
+            // Debug info - dimensões do frame
+            CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+            if (imageBuffer) {
+                size_t width = CVPixelBufferGetWidth(imageBuffer);
+                size_t height = CVPixelBufferGetHeight(imageBuffer);
+                writeLog(@"[CAMERA] Frame dimensões: %zu x %zu", width, height);
             }
         }
     } @catch (NSException *exception) {
@@ -254,7 +201,6 @@
 
 @end
 
-// Implementação do substituidor de feed da câmera
 @implementation VirtualCameraFeedReplacer
 
 // Método para substituir o buffer da câmera com um buffer de MJPEG
@@ -263,8 +209,22 @@
         return originalBuffer;
     }
     
-    // Simplesmente retornar o buffer MJPEG
-    return (CMSampleBufferRef)CFRetain(mjpegBuffer);
+    // Verificar se o buffer MJPEG tem uma imagem válida
+    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(mjpegBuffer);
+    if (imageBuffer == NULL) {
+        return originalBuffer;
+    }
+    
+    // Criar uma cópia do buffer MJPEG para garantir segurança de memória
+    CMSampleBufferRef resultBuffer = NULL;
+    OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, mjpegBuffer, &resultBuffer);
+    
+    if (status != noErr || resultBuffer == NULL) {
+        return originalBuffer;
+    }
+    
+    // Retornar a cópia do buffer MJPEG
+    return resultBuffer;
 }
 
 @end

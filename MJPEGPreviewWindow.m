@@ -12,7 +12,7 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
     static MJPEGPreviewWindow *sharedInstance = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        sharedInstance = [[self alloc] initWithFrame:CGRectMake(20, 60, 200, 290)];
+        sharedInstance = [[self alloc] initWithFrame:CGRectMake(20, 60, 200, 320)];
     });
     return sharedInstance;
 }
@@ -36,20 +36,33 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
         self.statusLabel.textAlignment = NSTextAlignmentCenter;
         [self addSubview:self.statusLabel];
         
-        // Preview image view
+        // Preview image view - começa com hidden
         self.previewImageView = [[UIImageView alloc] initWithFrame:CGRectMake(10, 60, 180, 120)];
         self.previewImageView.backgroundColor = [UIColor blackColor];
         self.previewImageView.contentMode = UIViewContentModeScaleAspectFit;
         self.previewImageView.layer.cornerRadius = 6;
         self.previewImageView.clipsToBounds = YES;
+        self.previewImageView.hidden = YES; // Inicialmente escondido
         [self addSubview:self.previewImageView];
         
-        // FPS label
+        // Botão para ativar/desativar preview
+        UIButton *previewToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        previewToggleButton.frame = CGRectMake(10, 60, 180, 30);
+        [previewToggleButton setTitle:@"Ativar Preview" forState:UIControlStateNormal];
+        previewToggleButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.3];
+        previewToggleButton.layer.cornerRadius = 6;
+        [previewToggleButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        [previewToggleButton addTarget:self action:@selector(togglePreview:) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:previewToggleButton];
+        self.previewToggleButton = previewToggleButton;
+        
+        // FPS label - inicialmente escondido
         self.fpsLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 190, 180, 20)];
         self.fpsLabel.text = @"FPS: --";
         self.fpsLabel.font = [UIFont systemFontOfSize:12];
         self.fpsLabel.textColor = [UIColor whiteColor];
         self.fpsLabel.textAlignment = NSTextAlignmentCenter;
+        self.fpsLabel.hidden = YES; // Inicialmente escondido
         [self addSubview:self.fpsLabel];
         
         // Servidor TextField
@@ -76,6 +89,16 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
         [self.connectButton addTarget:self action:@selector(connectButtonTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:self.connectButton];
         
+        // Botão de fechar/minimizar
+        UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        closeButton.frame = CGRectMake(10, 290, 180, 25);
+        [closeButton setTitle:@"Minimizar Interface" forState:UIControlStateNormal];
+        closeButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.3];
+        closeButton.layer.cornerRadius = 6;
+        [closeButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        [closeButton addTarget:self action:@selector(hideInterface) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:closeButton];
+        
         // Inicializar contadores de FPS
         self.frameCount = 0;
         self.lastFPSUpdate = [NSDate date];
@@ -87,6 +110,67 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
         writeLog(@"[UI] MJPEGPreviewWindow inicializado");
     }
     return self;
+}
+
+// Método para ativar/desativar a prévia
+- (void)togglePreview:(UIButton *)sender {
+    if (self.previewImageView.hidden) {
+        // Ativar preview
+        self.previewImageView.hidden = NO;
+        self.fpsLabel.hidden = NO;
+        [sender setTitle:@"Desativar Preview" forState:UIControlStateNormal];
+        
+        // Ajustar posição do botão para ficar embaixo do preview
+        CGRect frame = sender.frame;
+        frame.origin.y = 190;
+        sender.frame = frame;
+    } else {
+        // Desativar preview
+        self.previewImageView.hidden = YES;
+        self.fpsLabel.hidden = YES;
+        [sender setTitle:@"Ativar Preview" forState:UIControlStateNormal];
+        
+        // Retornar botão para posição original
+        CGRect frame = sender.frame;
+        frame.origin.y = 60;
+        sender.frame = frame;
+    }
+}
+
+// Esconder interface (minimizar)
+- (void)hideInterface {
+    self.hidden = YES;
+    
+    // Aguardar alguns segundos e mostrar apenas um pequeno indicador
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        UIButton *showButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        showButton.frame = CGRectMake(5, 60, 30, 30);
+        showButton.backgroundColor = [UIColor colorWithRed:0 green:0 blue:0.8 alpha:0.7];
+        showButton.layer.cornerRadius = 15;
+        [showButton setTitle:@"VC" forState:UIControlStateNormal];
+        [showButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        [showButton addTarget:self action:@selector(showInterface) forControlEvents:UIControlEventTouchUpInside];
+        
+        // Adicionar à janela de toque
+        UIWindow *touchWindow = [[UIWindow alloc] initWithFrame:CGRectMake(5, 60, 30, 30)];
+        touchWindow.windowLevel = UIWindowLevelNormal + 50;
+        touchWindow.backgroundColor = [UIColor clearColor];
+        [touchWindow addSubview:showButton];
+        [touchWindow makeKeyAndVisible];
+        self.touchWindow = touchWindow;
+    });
+}
+
+// Mostrar interface completa novamente
+- (void)showInterface {
+    self.hidden = NO;
+    [self makeKeyAndVisible];
+    
+    // Remover o botão de toque
+    if (self.touchWindow) {
+        self.touchWindow.hidden = YES;
+        self.touchWindow = nil;
+    }
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
@@ -120,6 +204,11 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
 }
 
 - (void)updatePreviewImage:(UIImage *)image {
+    // Só atualizar se o preview estiver visível
+    if (self.previewImageView.hidden) {
+        return;
+    }
+    
     dispatch_async(dispatch_get_main_queue(), ^{
         self.previewImageView.image = image;
         
@@ -155,18 +244,30 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
                 return;
             }
             
-            // Configurar apenas o necessário para preview
+            // IMPORTANTE: Ativar o VirtualCameraController PRIMEIRO
+            // Isso garante que qualquer app que use a câmera receba o feed substituído
+            [[VirtualCameraController sharedInstance] startCapturing];
+            
+            // Configurar MJPEGReader
             MJPEGReader *reader = [MJPEGReader sharedInstance];
-            __weak typeof(self) weakSelf = self;
-            reader.frameCallback = ^(UIImage *image) {
-                [weakSelf updatePreviewImage:image];
-            };
+            
+            // Configurar callback para UI - apenas se o preview estiver ativo
+            if (!self.previewImageView.hidden) {
+                __weak typeof(self) weakSelf = self;
+                reader.frameCallback = ^(UIImage *image) {
+                    [weakSelf updatePreviewImage:image];
+                };
+            } else {
+                // Desativar callback se preview estiver desativado
+                reader.frameCallback = nil;
+            }
             
             // Iniciar streaming de forma protegida
             @try {
                 [reader startStreamingFromURL:url];
                 self.isConnected = YES;
                 [self.connectButton setTitle:@"Desconectar" forState:UIControlStateNormal];
+                [self updateStatus:@"VirtualCam\nConectado"];
             } @catch (NSException *e) {
                 writeLog(@"[UI] Erro ao iniciar streaming: %@", e);
                 [self updateStatus:@"VirtualCam\nErro ao conectar"];
@@ -180,6 +281,9 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
                 [self updateStatus:@"VirtualCam\nDesconectado"];
                 self.previewImageView.image = nil;
                 self.fpsLabel.text = @"FPS: --";
+                
+                // Parar o VirtualCameraController também
+                [[VirtualCameraController sharedInstance] stopCapturing];
             } @catch (NSException *e) {
                 writeLog(@"[UI] Erro ao parar streaming: %@", e);
             }
