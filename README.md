@@ -3,7 +3,7 @@
 ## Streaming MJPEG para câmera iOS
 
 ![Badge](https://img.shields.io/badge/iOS-14.0%2B-blue)
-![Badge](https://img.shields.io/badge/Status-Em%20Desenvolvimento-yellow)
+![Badge](https://img.shields.io/badge/Status-Beta-yellow)
 
 ## Visão Geral
 
@@ -21,6 +21,13 @@ VCamMJPEG é um tweak para iOS jailbroken que permite substituir o feed da câme
 - Injeção de camada visual personalizada
 - Interação com o sistema AVFoundation
 - Substituição transparente em aplicativos que usam a câmera
+- Preservação da resolução e metadados originais da câmera
+
+### Captura de Fotos
+- Substituição do feed durante captura de fotos
+- Preservação de miniaturas (thumbnails) e previews
+- Redimensionamento automático para combinar com a câmera real
+- Manutenção da orientação da imagem baseada na orientação do dispositivo
 
 ### Interface de Controle
 - Janela flutuante com controles
@@ -31,34 +38,39 @@ VCamMJPEG é um tweak para iOS jailbroken que permite substituir o feed da câme
 
 ## Arquitetura do Projeto
 
-O projeto está dividido em várias classes principais:
+O projeto está dividido em vários componentes:
 
-- **MJPEGReader**: Responsável pela conexão com o servidor MJPEG, recepção e processamento do stream
-- **MJPEGPreviewWindow**: Gerencia a interface de usuário, controles e opções de preview
-- **VirtualCameraController**: Controla a substituição do feed da câmera nativa
-- **GetFrame**: Componente central para gerenciar o armazenamento e a recuperação dos frames para substituição
-- **Tweak.xm**: Contém os hooks para interceptar as chamadas da câmera e injetar nossas camadas
+- **Tweak.xm**: Arquivo principal com inicialização e definições globais
+- **CameraHooks.xm**: Hooks relacionados à câmera (AVCaptureSession, AVCaptureDevice)
+- **PhotoHooks.xm**: Hooks específicos para captura de fotos (AVCapturePhoto)
+- **PreviewHooks.xm**: Hooks relacionados ao preview da câmera
+- **UIHooks.xm**: Hooks relacionados à UI (miniaturas, imagens)
+- **MJPEGReader**: Responsável pela conexão e processamento do stream MJPEG
+- **GetFrame**: Gerencia frames para substituição
+- **VirtualCameraController**: Controla a substituição do feed da câmera
+- **MJPEGPreviewWindow**: Interface de usuário, controles e opções
 
 ## Como Funciona
 
-O VCamMJPEG utiliza uma abordagem focada na substituição da camada de visualização da câmera:
+O VCamMJPEG utiliza uma abordagem multicamada para a substituição da câmera:
 
-1. O servidor MJPEG envia um fluxo constante de imagens JPEG
-2. O MJPEGReader captura e processa estas imagens
-3. As imagens são convertidas em CMSampleBuffers pelo GetFrame
-4. O tweak injeta uma AVSampleBufferDisplayLayer personalizada sobre a camada de preview original da câmera
-5. Os frames MJPEG são enviados para esta camada personalizada
-6. Um CADisplayLink mantém a atualização constante da camada
+1. **Injeção em Processos**: Intercepta chamadas para a câmera em apps relevantes
+2. **Detecção Automática**: Identifica a resolução e configurações da câmera real
+3. **Recepção MJPEG**: Recebe e processa stream via MJPEGReader
+4. **Substituição de Buffers**: Substitui frames de vídeo e captura de fotos
+5. **Adaptação de Formato**: Redimensiona automaticamente para combinar com a câmera real
+6. **Preservação de Metadados**: Mantém informações essenciais como orientação e timestamps
 
 ## Estado Atual de Desenvolvimento
 
 - ✅ Recepção e processamento de streams MJPEG
 - ✅ Interface de preview com opção de ativar/desativar
 - ✅ Substituição do feed de visualização da câmera
-- 🔄 Substituição do feed durante captura de fotos (em desenvolvimento)
-- 🔄 Estabilidade em diferentes aplicativos (trabalho em andamento)
-- 🔄 Suporte para orientação variável (parcialmente implementado)
-- 🔄 Seleção entre câmeras frontal/traseira
+- ✅ Substituição durante captura de fotos
+- 🔄 Preservação de resolução e metadados
+- 🔄 Substituição de miniaturas (thumbnails)
+- 🔄 Compatibilidade com câmeras frontal/traseira
+- 🔄 Suporte completo a vídeos
 - 🔄 Configurações avançadas de qualidade e performance
 
 ## Como Usar
@@ -72,6 +84,7 @@ O VCamMJPEG utiliza uma abordagem focada na substituição da camada de visualiz
 5. Clique em "Conectar" para iniciar a captura
 6. Você pode ativar/desativar o preview conforme necessário
 7. Abra qualquer aplicativo que use a câmera para ver a substituição em ação
+8. Tire fotos normalmente - elas serão capturadas do stream MJPEG
 
 ## Servidor MJPEG Incluído
 
@@ -83,28 +96,34 @@ O projeto inclui um servidor MJPEG básico escrito em Node.js que pode ser confi
 
 ## Requisitos
 
-- iOS 14.0 ou posterior
+- iOS 14.0 até 16.7.10
 - Dispositivo com jailbreak
 - Servidor MJPEG na rede local
 
 ## Problemas Conhecidos
 
-- A captura de fotos ainda usa a câmera real em vez do stream MJPEG (em desenvolvimento)
+- Algumas operações de processamento de vídeo avançadas ainda não são suportadas
 - Pode ocorrer consumo elevado de bateria devido ao processamento contínuo
-- A orientação do vídeo pode não corresponder perfeitamente à orientação do dispositivo
+- A orientação do vídeo pode precisar de ajustes em algumas situações
 
 ## Próximos Passos
 
-- Implementar a substituição durante a captura de fotos
-- Melhorar a estabilidade e evitar crashes
-- Aprimorar o suporte a diferentes orientações de tela
-- Adicionar suporte para múltiplas câmeras (frontal/traseira)
+- Melhorar a detecção e uso de câmeras frontal/traseira
+- Aprimorar o suporte a diferentes resoluções
+- Adicionar suporte para Live Photos
 - Implementar controles de qualidade e performance
 - Otimizar o uso de bateria
+- Melhorar a compatibilidade com diversos aplicativos
+
+## Compatibilidade
+
+- iOS 14.1 (iPhone 7) atualmente
+- iOS 15.8.3 (iPhone 7) falta testar
+- iOS 16.7.10 (iPhone 8) falta testar
 
 ## Créditos
 
-Este projeto foi inspirado por outros tweaks de câmera virtual, combinando técnicas de diferentes fontes para criar uma solução robusta de substituição de câmera via MJPEG.
+Este projeto foi desenvolvido combinando técnicas de diferentes fontes para criar uma solução robusta de substituição de câmera via MJPEG.
 
 ## Licença
 

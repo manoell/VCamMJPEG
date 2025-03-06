@@ -1,3 +1,81 @@
+// Dica: Execute "npm install chalk@4.1.2" para instalar uma versão compatível com CommonJS
+// Esta versão funciona com require()
+
+// Configuração de logs aprimorados
+const chalk = require('chalk'); // Versão 4.1.2 ou anterior recomendada
+
+// Cores para diferentes tipos de logs
+const colors = {
+    info: chalk.blue,
+    success: chalk.green,
+    warning: chalk.yellow,
+    error: chalk.red,
+    system: chalk.magenta,
+    client: chalk.cyan,
+    ffmpeg: chalk.keyword('orange') // Laranja para logs relacionados ao FFmpeg
+};
+
+// Função para formatar timestamp para logs
+function getTimestamp() {
+    const now = new Date();
+    const date = now.toLocaleDateString();
+    const time = now.toLocaleTimeString();
+    return `${date} ${time}`;
+}
+
+// Sobrescrever console.log com versão melhorada
+const originalLog = console.log;
+const originalError = console.error;
+
+// Função de log melhorada com categorias e formatação
+function log(category, ...args) {
+    const color = colors[category] || chalk.white;
+    const timestamp = chalk.gray(`[${getTimestamp()}]`);
+    const categoryText = color(`[${category.toUpperCase()}]`);
+    
+    originalLog(timestamp, categoryText, ...args);
+}
+
+// Substituir console.log e console.error
+console.log = function(...args) {
+    if (args.length > 0 && typeof args[0] === 'string' && args[0].startsWith('╔')) {
+        // Preservar formato do banner sem adicionar categoria
+        originalLog(chalk.gray(`[${getTimestamp()}]`), chalk.cyan(...args));
+        return;
+    }
+    log('info', ...args);
+};
+
+console.error = function(...args) {
+    log('error', ...args);
+};
+
+// Funções específicas para cada tipo de log
+console.info = function(...args) {
+    log('info', ...args);
+};
+
+console.success = function(...args) {
+    log('success', ...args);
+};
+
+console.warning = function(...args) {
+    log('warning', ...args);
+};
+
+console.system = function(...args) {
+    log('system', ...args);
+};
+
+console.client = function(...args) {
+    log('client', ...args);
+};
+
+console.ffmpeg = function(...args) {
+    log('ffmpeg', ...args);
+};
+
+// O resto do código permanece igual, mas substitua os logs por categorias apropriadas
 const express = require('express');
 const http = require('http');
 const { spawn } = require('child_process');
@@ -40,7 +118,7 @@ const systemInfo = {
     freeMemory: Math.round(os.freemem() / (1024 * 1024)) + 'MB'
 };
 
-console.log('Sistema detectado:', systemInfo);
+console.system('Sistema detectado:', systemInfo);
 
 // Página principal com painel de status
 app.get('/', (req, res) => {
@@ -224,7 +302,7 @@ app.get('/api/status', (req, res) => {
 
 // Stream MJPEG
 app.get('/mjpeg', (req, res) => {
-    console.log('Novo cliente conectado');
+    console.client('Novo cliente conectado');
     
     // Configuração do cabeçalho MJPEG otimizado
     res.writeHead(200, {
@@ -259,14 +337,14 @@ app.get('/mjpeg', (req, res) => {
     
     // Remover cliente quando a conexão for fechada
     req.on('close', () => {
-        console.log('Cliente desconectado');
+        console.client('Cliente desconectado');
         clients = clients.filter(client => client.id !== clientId);
         clientCount = clients.length;
     });
     
     // Timeout para clientes inativos
     req.on('timeout', () => {
-        console.log('Timeout de cliente');
+        console.warning('Timeout de cliente');
         clients = clients.filter(client => client.id !== clientId);
         clientCount = clients.length;
     });
@@ -345,12 +423,16 @@ function setupFFmpegHandlers(ffmpeg) {
         // Filtrar logs de ffmpeg para mostrar apenas erros importantes
         const logStr = data.toString();
         if (logStr.includes('Error') || logStr.includes('error') || logStr.includes('fail')) {
-            console.error(`ffmpeg erro: ${logStr}`);
+            console.ffmpeg(`Erro: ${logStr}`);
         }
     });
 
     ffmpeg.on('close', (code) => {
-        console.log(`ffmpeg encerrado com código ${code}`);
+        if (code === 0) {
+            console.ffmpeg(`Processo encerrado normalmente com código ${code}`);
+        } else {
+            console.warning(`FFmpeg encerrado com código de erro ${code}`);
+        }
     });
 }
 
@@ -373,16 +455,16 @@ function startCapture(cameraName) {
         '-'                                  // Saída para stdout
     ];
     
-    console.log('Iniciando ffmpeg com configuração:', ffmpegArgs.join(' '));
-    
+    console.ffmpeg('Iniciando captura com configuração:', ffmpegArgs.join(' '));
+
     const ffmpeg = spawn('ffmpeg', ffmpegArgs);
     setupFFmpegHandlers(ffmpeg);
     
     // Configurar um watchdog para reiniciar se nenhum frame for recebido
     setTimeout(() => {
         if (framesProcessed === 0) {
-            console.log(`Nenhum frame recebido da câmera ${cameraName} após 10 segundos.`);
-            console.log('Reiniciando ffmpeg...');
+            console.warning(`Nenhum frame recebido da câmera ${cameraName} após 10 segundos.`);
+            console.info('Reiniciando ffmpeg...');
             ffmpeg.kill();
             setTimeout(() => startCapture(cameraName), 1000);
         }
@@ -393,7 +475,7 @@ function startCapture(cameraName) {
 
 // Função para criar um padrão de teste
 function startTestPatternCapture() {
-    console.log('Iniciando padrão de teste como fonte de vídeo');
+    console.ffmpeg('Iniciando padrão de teste como fonte de vídeo');
     
     // Atualizar a variável global de câmera
     currentCamera = "Padrão de Teste (Sem câmera)";
@@ -410,7 +492,7 @@ function startTestPatternCapture() {
         '-'                                  // Saída para stdout
     ];
     
-    console.log('Iniciando ffmpeg com padrão de teste:', ffmpegArgs.join(' '));
+    console.ffmpeg('Iniciando ffmpeg com padrão de teste:', ffmpegArgs.join(' '));
     
     const ffmpeg = spawn('ffmpeg', ffmpegArgs);
     setupFFmpegHandlers(ffmpeg);
@@ -418,7 +500,7 @@ function startTestPatternCapture() {
     // Configurar reinício automático em caso de falha
     ffmpeg.on('close', (code) => {
         if (code !== 0) {
-            console.log('Padrão de teste encerrado com erro. Reiniciando...');
+            console.warning('Padrão de teste encerrado com erro. Reiniciando...');
             setTimeout(() => startTestPatternCapture(), 2000);
         }
     });
@@ -428,7 +510,7 @@ function startTestPatternCapture() {
 
 // Função para listar e escolher a webcam
 async function selectWebcam() {
-    console.log('Buscando dispositivos de câmera disponíveis...');
+    console.info('Buscando dispositivos de câmera disponíveis...');
     
     try {
         // Executar FFmpeg para listar dispositivos
@@ -444,7 +526,7 @@ async function selectWebcam() {
         // Processar após fechar
         await new Promise((resolve) => {
             ffmpeg.on('close', (code) => {
-                console.log('Lista de dispositivos finalizada com código:', code);
+                console.info('Lista de dispositivos finalizada com código:', code);
                 resolve();
             });
         });
@@ -471,11 +553,11 @@ async function selectWebcam() {
             }
         }
         
-        console.log('Dispositivos de vídeo encontrados:', videoDevices);
+        console.info('Dispositivos de vídeo encontrados:', videoDevices);
         
         // Se não encontrou dispositivos, tente alguns nomes comuns
         if (videoDevices.length === 0) {
-            console.log('Nenhum dispositivo encontrado via FFmpeg. Adicionando nomes comuns...');
+            console.warning('Nenhum dispositivo encontrado via FFmpeg. Adicionando nomes comuns...\n');
             videoDevices.push(
                 'ManyCam Virtual Webcam',
                 'Webcam',
@@ -492,7 +574,7 @@ async function selectWebcam() {
         videoDevices.push('TEST PATTERN (Sem câmera)');
         
         // Mostrar menu para escolha
-        console.log('\n=======================================');
+        console.log('=======================================');
         console.log('SELECIONE UMA CÂMERA PARA O STREAMING:');
         console.log('=======================================');
         
@@ -500,7 +582,7 @@ async function selectWebcam() {
             console.log(`${index + 1}. ${device}`);
         });
         
-        console.log('\nDigite o número da câmera desejada e pressione ENTER:');
+        console.log('Digite o número da câmera desejada e pressione ENTER:');
         
         // Função para ler a entrada do usuário
         const readUserInput = () => {
@@ -512,7 +594,7 @@ async function selectWebcam() {
                 stdin.on('data', (data) => {
                     const input = parseInt(data.trim());
                     if (isNaN(input) || input < 1 || input > videoDevices.length) {
-                        console.log(`Por favor, digite um número entre 1 e ${videoDevices.length}:`);
+                        console.warning(`Por favor, digite um número entre 1 e ${videoDevices.length}:`);
                     } else {
                         stdin.pause();
                         resolve(input - 1); // Índice baseado em zero
@@ -525,7 +607,7 @@ async function selectWebcam() {
         const selectedIndex = await readUserInput();
         const selectedDevice = videoDevices[selectedIndex];
         
-        console.log(`\nVocê selecionou: ${selectedDevice}`);
+        console.success(`Você selecionou: ${selectedDevice}`);
         
         // Se for o padrão de teste
         if (selectedDevice === 'TEST PATTERN (Sem câmera)') {
@@ -538,7 +620,7 @@ async function selectWebcam() {
         };
     } catch (error) {
         console.error('Erro ao buscar câmeras:', error);
-        console.log('Usando padrão de teste como fallback...');
+        console.warning('Usando padrão de teste como fallback...');
         return { isTestPattern: true };
     }
 }
@@ -560,10 +642,10 @@ server.listen(PORT, () => {
     // Iniciar o processo de seleção e captura
     selectWebcam().then(result => {
         if (result.isTestPattern) {
-            console.log('Iniciando com padrão de teste...');
+            console.success('Iniciando com padrão de teste...');
             startTestPatternCapture();
         } else {
-            console.log(`Iniciando captura com a câmera: ${result.deviceName}`);
+            console.success(`Iniciando captura com a câmera: ${result.deviceName}`);
             startCapture(result.deviceName);
         }
     });
