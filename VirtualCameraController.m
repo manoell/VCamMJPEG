@@ -6,6 +6,9 @@
 // Variável global para rastrear se a captura está ativa em todo o sistema
 static BOOL gCaptureSystemActive = NO;
 
+// Definição para verificação de versão do iOS
+#define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v)  ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedAscending)
+
 @interface VirtualCameraController ()
 {
     // Usar variáveis de instância para tipos C
@@ -275,6 +278,78 @@ static BOOL gCaptureSystemActive = NO;
     
     // Retornar a cópia do buffer MJPEG (possivelmente com timing atualizado)
     return resultBuffer;
+}
+
+@end
+
+@implementation AVCapturePhotoProxy
+
++ (instancetype)proxyWithDelegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
+    AVCapturePhotoProxy *proxy = [[AVCapturePhotoProxy alloc] init];
+    proxy.originalDelegate = delegate;
+    return proxy;
+}
+
+#pragma mark - AVCapturePhotoCaptureDelegate Methods
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+// iOS 10+
+- (void)captureOutput:(AVCapturePhotoOutput *)output didFinishProcessingPhotoSampleBuffer:(CMSampleBufferRef)photoSampleBuffer previewPhotoSampleBuffer:(CMSampleBufferRef)previewPhotoSampleBuffer resolvedSettings:(AVCaptureResolvedPhotoSettings *)resolvedSettings bracketSettings:(AVCaptureBracketedStillImageSettings *)bracketSettings error:(NSError *)error {
+    
+    if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didFinishProcessingPhotoSampleBuffer:previewPhotoSampleBuffer:resolvedSettings:bracketSettings:error:)]) {
+        
+        writeLog(@"[PHOTOPROXY] Interceptando didFinishProcessingPhotoSampleBuffer");
+        
+        // Obter buffer de substituição
+        CMSampleBufferRef mjpegBuffer = photoSampleBuffer ? [GetFrame getCurrentFrame:photoSampleBuffer replace:YES] : nil;
+        
+        if (mjpegBuffer && CMSampleBufferIsValid(mjpegBuffer)) {
+            writeLog(@"[PHOTOPROXY] Substituindo buffer na finalização da captura de foto");
+            
+            [self.originalDelegate captureOutput:output
+                didFinishProcessingPhotoSampleBuffer:mjpegBuffer
+                       previewPhotoSampleBuffer:previewPhotoSampleBuffer
+                             resolvedSettings:resolvedSettings
+                              bracketSettings:bracketSettings
+                                       error:error];
+        } else {
+            [self.originalDelegate captureOutput:output
+                didFinishProcessingPhotoSampleBuffer:photoSampleBuffer
+                       previewPhotoSampleBuffer:previewPhotoSampleBuffer
+                             resolvedSettings:resolvedSettings
+                              bracketSettings:bracketSettings
+                                       error:error];
+        }
+    }
+}
+#pragma clang diagnostic pop
+
+// iOS 11+
+- (void)captureOutput:(AVCapturePhotoOutput *)output didFinishProcessingPhoto:(AVCapturePhoto *)photo error:(NSError *)error {
+    if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didFinishProcessingPhoto:error:)]) {
+        
+        writeLog(@"[PHOTOPROXY] Interceptando didFinishProcessingPhoto");
+        
+        // Como não podemos modificar o AVCapturePhoto diretamente,
+        // apenas passamos para o delegate original
+        [self.originalDelegate captureOutput:output didFinishProcessingPhoto:photo error:error];
+    }
+}
+
+// Implementações para outros métodos do protocolo AVCapturePhotoCaptureDelegate
+// Adicione conforme necessário
+
+// Método para encaminhar mensagens desconhecidas para o delegate original
+- (BOOL)respondsToSelector:(SEL)aSelector {
+    return [super respondsToSelector:aSelector] || [self.originalDelegate respondsToSelector:aSelector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)aSelector {
+    if ([self.originalDelegate respondsToSelector:aSelector]) {
+        return self.originalDelegate;
+    }
+    return [super forwardingTargetForSelector:aSelector];
 }
 
 @end
