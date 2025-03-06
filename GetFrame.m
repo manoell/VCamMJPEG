@@ -59,6 +59,29 @@ static NSLock *bufferLock = nil;
                     @try {
                         // Copiar timestamp de apresentação para manter sincronização
                         CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(inputBuffer);
+                        CMTime duration = CMSampleBufferGetDuration(inputBuffer);
+                        
+                        // Criar timing info baseado no inputBuffer
+                        CMSampleTimingInfo timing = {0};
+                        timing.duration = duration;
+                        timing.presentationTimeStamp = presentationTime;
+                        timing.decodeTimeStamp = kCMTimeInvalid;
+                        
+                        // Criar novo buffer com timing sincronizado
+                        CMSampleBufferRef syncedBuffer = NULL;
+                        status = CMSampleBufferCreateCopyWithNewTiming(
+                            kCFAllocatorDefault,
+                            resultBuffer,
+                            1,
+                            &timing,
+                            &syncedBuffer
+                        );
+                        
+                        if (status == noErr && syncedBuffer != NULL) {
+                            // Liberar o buffer anterior
+                            CFRelease(resultBuffer);
+                            resultBuffer = syncedBuffer;
+                        }
                         
                         // Anexar timestamp como metadado
                         CMSetAttachment(resultBuffer, CFSTR("FrameTimeStamp"),
@@ -163,6 +186,137 @@ static NSLock *bufferLock = nil;
         writeLog(@"[GETFRAME] Exceção ao processar frame MJPEG: %@", e);
     }
     [bufferLock unlock];
+}
+
+// Método para criar um CMSampleBuffer a partir de dados JPEG
+- (CMSampleBufferRef)createSampleBufferFromJPEGData:(NSData *)jpegData withSize:(CGSize)size {
+    if (!jpegData || jpegData.length == 0) {
+        writeLog(@"[MJPEG] Dados JPEG inválidos");
+        return NULL;
+    }
+    
+    // Criar um CVPixelBuffer
+    CVPixelBufferRef pixelBuffer = NULL;
+    
+    // Especificar propriedades do buffer para melhor compatibilidade
+    NSDictionary *options = @{
+        (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
+        (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
+        (id)kCVPixelBufferMetalCompatibilityKey: @YES,
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        // Adicionar propriedade para otimizar performance
+        (id)kCVPixelBufferPoolAllocationThresholdKey: @6
+    };
+    
+    // Criar pixel buffer vazio
+    CVReturn status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                        size.width,
+                                        size.height,
+                                        kCVPixelFormatType_32BGRA,  // Formato mais compatível
+                                        (__bridge CFDictionaryRef)options,
+                                        &pixelBuffer);
+    
+    if (status != kCVReturnSuccess) {
+        writeLog(@"[MJPEG] Falha ao criar CVPixelBuffer: %d", status);
+        return NULL;
+    }
+    
+    // Criar uma imagem CGImage a partir dos dados JPEG
+    CGDataProviderRef dataProvider = CGDataProviderCreateWithData(NULL, jpegData.bytes, jpegData.length, NULL);
+    CGImageRef cgImage = CGImageCreateWithJPEGDataProvider(dataProvider, NULL, true, kCGRenderingIntentDefault);
+    CGDataProviderRelease(dataProvider);
+    
+    if (cgImage == NULL) {
+        CVPixelBufferRelease(pixelBuffer);
+        writeLog(@"[MJPEG] Falha ao criar CGImage");
+        return NULL;
+    }
+    
+    // Bloquear o buffer para escrita
+    CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+    
+    // Obter o ponteiro para os dados do buffer
+    void *baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer);
+    size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
+    
+    // Configurar contexto para desenhar a imagem no buffer
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(baseAddress,
+                                              size.width,
+                                              size.height,
+                                              8,
+                                              bytesPerRow,
+                                              colorSpace,
+                                              kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
+    CGColorSpaceRelease(colorSpace);
+    
+    if (context == NULL) {
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+        CVPixelBufferRelease(pixelBuffer);
+        CGImageRelease(cgImage);
+        writeLog(@"[MJPEG] Falha ao criar contexto de bitmap");
+        return NULL;
+    }
+    
+    // Limpar o contexto para evitar artefatos
+    CGContextClearRect(context, CGRectMake(0, 0, size.width, size.height));
+    
+    // Desenhar a imagem no contexto com a orientação correta
+    CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), cgImage);
+    
+    // Liberar recursos
+    CGContextRelease(context);
+    CGImageRelease(cgImage);
+    
+    // Desbloquear o buffer
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+    
+    // Criar referência ao formato de vídeo
+    CMFormatDescriptionRef formatDescription = NULL;
+    status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDescription);
+    
+    if (status != noErr) {
+        CVPixelBufferRelease(pixelBuffer);
+        writeLog(@"[MJPEG] Falha ao criar descrição de formato: %d", status);
+        return NULL;
+    }
+    
+    // Criar uma referência de tempo precisa para o sample buffer
+    CMSampleTimingInfo timing;
+    timing.duration = CMTimeMake(1, 30); // 30 fps
+    timing.presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000);
+    timing.decodeTimeStamp = kCMTimeInvalid;
+    
+    // Criar o sample buffer final
+    CMSampleBufferRef sampleBuffer = NULL;
+    status = CMSampleBufferCreateForImageBuffer(
+        kCFAllocatorDefault,
+        pixelBuffer,
+        true,
+        NULL,
+        NULL,
+        formatDescription,
+        &timing,
+        &sampleBuffer
+    );
+    
+    // Liberar recursos
+    CFRelease(formatDescription);
+    CVPixelBufferRelease(pixelBuffer);
+    
+    if (status != noErr || !sampleBuffer) {
+        writeLog(@"[MJPEG] Falha ao criar sample buffer: %d", status);
+        return NULL;
+    }
+    
+    // Log para depuração
+    static int sampleBufferCount = 0;
+    if (sampleBufferCount++ % 300 == 0) {
+        writeLog(@"[MJPEG] SampleBuffer #%d criado com sucesso (dimensões: %.0f x %.0f)",
+                sampleBufferCount, size.width, size.height);
+    }
+    
+    return sampleBuffer;
 }
 
 // Liberar recursos ao descarregar o tweak

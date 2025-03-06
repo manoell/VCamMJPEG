@@ -33,11 +33,15 @@ static BOOL gCaptureSystemActive = NO;
         _isActive = NO;
         _debugMode = YES;
         _frameCounter = 0;
+        _preferDisplayLayerInjection = YES; // Por padrão, preferir injeção via DisplayLayer
         
         // Configurar callbacks apenas se não estivermos no SpringBoard
         if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
             // Configurar callback para frames MJPEG
             MJPEGReader *reader = [MJPEGReader sharedInstance];
+            
+            // Configurar para modo de alta prioridade
+            [reader setHighPriority:YES];
             
             // Armazenar self fraco para evitar retenção circular
             __weak typeof(self) weakSelf = self;
@@ -53,6 +57,12 @@ static BOOL gCaptureSystemActive = NO;
 
 - (void)dealloc {
     [self stopCapturing];
+}
+
+- (void)setPreferDisplayLayerInjection:(BOOL)prefer {
+    _preferDisplayLayerInjection = prefer;
+    writeLog(@"[CAMERA] Modo de injeção definido para: %@",
+             prefer ? @"AVSampleBufferDisplayLayer" : @"AVCaptureOutput");
 }
 
 - (BOOL)checkAndActivate {
@@ -82,7 +92,8 @@ static BOOL gCaptureSystemActive = NO;
         return;
     }
     
-    writeLog(@"[CAMERA] Iniciando captura virtual");
+    writeLog(@"[CAMERA] Iniciando captura virtual (Modo: %@)",
+             self.preferDisplayLayerInjection ? @"DisplayLayer" : @"CaptureOutput");
     
     // Inicializar a fila de processamento se não existir
     if (!_processingQueue) {
@@ -109,6 +120,9 @@ static BOOL gCaptureSystemActive = NO;
             [weakSelf processSampleBuffer:sampleBuffer];
         };
     }
+    
+    // Configurar para alta prioridade
+    [reader setHighPriority:YES];
 }
 
 - (void)stopCapturing {
@@ -117,6 +131,9 @@ static BOOL gCaptureSystemActive = NO;
     writeLog(@"[CAMERA] Parando captura virtual");
     self.isActive = NO;
     gCaptureSystemActive = NO;
+    
+    // Configurar MJPEGReader para modo normal
+    [[MJPEGReader sharedInstance] setHighPriority:NO];
     
     // Vamos também limpar a instância GetFrame para liberar buffers
     [GetFrame cleanupResources];
@@ -223,7 +240,40 @@ static BOOL gCaptureSystemActive = NO;
         return originalBuffer;
     }
     
-    // Retornar a cópia do buffer MJPEG
+    // Se o originalBuffer for válido, transferir informações de timing
+    if (originalBuffer && CMSampleBufferIsValid(originalBuffer)) {
+        @try {
+            // Copiar timing do buffer original
+            CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(originalBuffer);
+            CMTime duration = CMSampleBufferGetDuration(originalBuffer);
+            
+            // Criar timing info para sincronização
+            CMSampleTimingInfo timing = {0};
+            timing.duration = duration;
+            timing.presentationTimeStamp = presentationTime;
+            timing.decodeTimeStamp = kCMTimeInvalid;
+            
+            // Criar novo buffer com timing sincronizado
+            CMSampleBufferRef syncedBuffer = NULL;
+            status = CMSampleBufferCreateCopyWithNewTiming(
+                kCFAllocatorDefault,
+                resultBuffer,
+                1,
+                &timing,
+                &syncedBuffer
+            );
+            
+            if (status == noErr && syncedBuffer != NULL) {
+                // Liberar o buffer anterior
+                CFRelease(resultBuffer);
+                resultBuffer = syncedBuffer;
+            }
+        } @catch (NSException *e) {
+            // Em caso de erro, continuar com o buffer não sincronizado
+        }
+    }
+    
+    // Retornar a cópia do buffer MJPEG (possivelmente com timing atualizado)
     return resultBuffer;
 }
 

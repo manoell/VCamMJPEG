@@ -15,10 +15,12 @@
 @property (nonatomic, assign) CGSize lastKnownResolution;
 @property (nonatomic, strong) NSURL *currentURL;
 @property (nonatomic, assign) CMSampleBufferRef lastReceivedSampleBuffer;
+@property (nonatomic, assign) BOOL highPriorityMode; // Nova propriedade para modo de alta prioridade
 
 + (instancetype)sharedInstance;
 - (void)startStreamingFromURL:(NSURL *)url;
 - (void)stopStreaming;
 - (CMSampleBufferRef)createSampleBufferFromJPEGData:(NSData *)jpegData withSize:(CGSize)size;
+- (void)setHighPriority:(BOOL)enabled; // Novo método para configurar prioridade
 
 @end
