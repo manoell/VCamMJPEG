@@ -38,11 +38,13 @@ void logDelegates() {
 // Função para detectar dimensões das câmeras
 void detectCameraResolutions() {
     // Resolução padrão caso falhe a detecção automática
-    g_originalFrontCameraResolution = CGSizeMake(1280, 960); // iPhone 7/8 Front
-    g_originalBackCameraResolution = CGSizeMake(4032, 3024); // iPhone 7/8 Back
+    g_originalFrontCameraResolution = CGSizeMake(960, 1280); // iPhone 7/8 Front
+    g_originalBackCameraResolution = CGSizeMake(1072, 1920); // iPhone 7/8 Back
     
     // A detecção real ocorre via hooks em AVCaptureDevice em CameraHooks.xm
-    writeLog(@"[INIT] Configurando resoluções de câmera padrão");
+    writeLog(@"[INIT] Configurando resoluções de câmera padrão: Front %@, Back %@",
+             NSStringFromCGSize(g_originalFrontCameraResolution),
+             NSStringFromCGSize(g_originalBackCameraResolution));
 }
 
 // Constructor - roda quando o tweak é carregado

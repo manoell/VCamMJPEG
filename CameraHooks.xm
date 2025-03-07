@@ -3,6 +3,17 @@
 // Grupo para hooks relacionados à câmera
 %group CameraHooks
 
+// Função auxiliar para garantir que a resolução da câmera está atualizada
+static void updateCurrentCameraResolution() {
+    // Atualizar a resolução atual com base na câmera em uso
+    g_originalCameraResolution = g_usingFrontCamera ? g_originalFrontCameraResolution : g_originalBackCameraResolution;
+    
+    // Log para depuração
+    writeLog(@"[HOOK] Resolução atual da câmera atualizada para %.0f x %.0f (Câmera %@)",
+             g_originalCameraResolution.width, g_originalCameraResolution.height,
+             g_usingFrontCamera ? @"Frontal" : @"Traseira");
+}
+
 // Hook para AVCaptureSession para monitorar quando a câmera é iniciada
 %hook AVCaptureSession
 
@@ -44,12 +55,23 @@
 %hook AVCaptureConnection
 
 - (void)setVideoOrientation:(AVCaptureVideoOrientation)videoOrientation {
-    writeLog(@"[HOOK] setVideoOrientation: %d", (int)videoOrientation);
+    writeLog(@"[HOOK] setVideoOrientation: %d (Anterior: %d)", (int)videoOrientation, g_videoOrientation);
     g_isVideoOrientationSet = YES;
     g_videoOrientation = (int)videoOrientation;
+    
+    // Log detalhado
+    NSString *orientationDesc;
+    switch ((int)videoOrientation) {
+        case 1: orientationDesc = @"Portrait"; break;
+        case 2: orientationDesc = @"Portrait Upside Down"; break;
+        case 3: orientationDesc = @"Landscape Right"; break;
+        case 4: orientationDesc = @"Landscape Left"; break;
+        default: orientationDesc = @"Desconhecido"; break;
+    }
+    
+    writeLog(@"[HOOK] Orientação definida para: %@ (%d)", orientationDesc, (int)videoOrientation);
     %orig;
 }
-
 %end
 
 // Hook para AVCaptureDevice para obter a resolução real da câmera
@@ -97,8 +119,8 @@
     BOOL isFrontCamera = (position == 2);
     g_usingFrontCamera = isFrontCamera;
     
-    // Atualizar a resolução com base na câmera
-    g_originalCameraResolution = isFrontCamera ? g_originalFrontCameraResolution : g_originalBackCameraResolution;
+    // Usar a função de atualização em vez do código direto
+    updateCurrentCameraResolution();
     
     writeLog(@"[HOOK] Mudança de câmera detectada: %@", isFrontCamera ? @"Frontal" : @"Traseira");
 }

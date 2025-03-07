@@ -3,6 +3,22 @@
 // Grupo para hooks relacionados à captura de fotos
 %group PhotoHooks
 
+// Função para garantir que a resolução da câmera seja conhecida
+static void ensureCameraResolutionAvailable() {
+    if (CGSizeEqualToSize(g_originalCameraResolution, CGSizeZero)) {
+        // Se não detectou a resolução, usar valores padrão para o iPhone
+        if (g_usingFrontCamera) {
+            g_originalCameraResolution = CGSizeMake(2320, 3088); // Valores comuns para câmeras frontais em iPhones modernos
+            writeLog(@"[HOOK] Usando resolução padrão da câmera frontal: %.0f x %.0f",
+                    g_originalCameraResolution.width, g_originalCameraResolution.height);
+        } else {
+            g_originalCameraResolution = CGSizeMake(3024, 4032); // Valores comuns para câmeras traseiras em iPhones modernos
+            writeLog(@"[HOOK] Usando resolução padrão da câmera traseira: %.0f x %.0f",
+                    g_originalCameraResolution.width, g_originalCameraResolution.height);
+        }
+    }
+}
+
 // Hook para AVCapturePhotoOutput para iOS 10+ (inclui iOS 14+)
 %hook AVCapturePhotoOutput
 
@@ -17,6 +33,9 @@
     
     g_isCapturingPhoto = YES;
     writeLog(@"[HOOK] Preparando para capturar foto com nossa substituição");
+    
+    // Garantir que temos uma resolução válida
+    ensureCameraResolutionAvailable();
     
     // Armazenar resolução e outras configurações da foto original
     // Isso é importante para manter a compatibilidade com o app de câmera
@@ -39,20 +58,6 @@
                             previewWidth, previewHeight);
                 }
             }
-        }
-        
-        // Usar a resolução da câmera para fotos se não tivermos a informação
-        if (CGSizeEqualToSize(g_originalCameraResolution, CGSizeZero)) {
-            // Definir uma resolução padrão para o tipo de câmera em uso
-            if (g_usingFrontCamera) {
-                g_originalCameraResolution = CGSizeMake(961, 1280); // Dimensões frontais informadas
-            } else {
-                g_originalCameraResolution = CGSizeMake(1072, 1920); // Dimensões traseiras informadas
-            }
-            
-            writeLog(@"[HOOK] Usando resolução padrão para câmera %@: %.0f x %.0f",
-                    g_usingFrontCamera ? @"frontal" : @"traseira",
-                    g_originalCameraResolution.width, g_originalCameraResolution.height);
         }
     }
     
@@ -90,6 +95,9 @@
         return %orig;
     }
     
+    // Garantir que temos uma resolução válida
+    ensureCameraResolutionAvailable();
+    
     // Obter o frame atual com flags mais fortes
     CMSampleBufferRef buffer = [GetFrame getCurrentFrame:nil replace:YES];
     if (buffer && CMSampleBufferIsValid(buffer)) {
@@ -123,29 +131,55 @@
                         mjpegWidth, mjpegHeight,
                         g_originalCameraResolution.width, g_originalCameraResolution.height);
                 
-                // Criar um contexto de escala para redimensionar a imagem
+                // Implementação melhorada de redimensionamento
+                // Criar um novo contexto de bitmap com as dimensões corretas
+                size_t targetWidth = g_originalCameraResolution.width;
+                size_t targetHeight = g_originalCameraResolution.height;
+                
+                // Criar contexto de destino com as dimensões corretas
                 CIContext *context = [CIContext contextWithOptions:nil];
-                CGRect targetRect = CGRectMake(0, 0, g_originalCameraResolution.width, g_originalCameraResolution.height);
+                CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
                 
-                // Aplicar transformação de escala
-                CIImage *scaledImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(
-                    g_originalCameraResolution.width / mjpegWidth,
-                    g_originalCameraResolution.height / mjpegHeight)];
+                // Criar um bitmap context para o redimensionamento
+                CGContextRef bitmapContext = CGBitmapContextCreate(NULL,
+                                                            targetWidth,
+                                                            targetHeight,
+                                                            8, // bits por componente
+                                                            0, // bytes por linha (0 = automático)
+                                                            colorSpace,
+                                                            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
                 
-                // Criar CGImage redimensionado
-                CGImageRef cgImage = [context createCGImage:scaledImage fromRect:targetRect];
-                
-                if (!cgImage) {
-                    writeLog(@"[HOOK] Falha: cgImage redimensionado é NULL");
-                    // Tentar com a imagem original
-                    cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
-                    if (!cgImage) {
-                        return %orig;
+                if (bitmapContext) {
+                    // Obter CGImage a partir do CIImage
+                    CGImageRef originalImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+                    
+                    if (originalImage) {
+                        // Definir alta qualidade de interpolação
+                        CGContextSetInterpolationQuality(bitmapContext, kCGInterpolationHigh);
+                        
+                        // Desenhar a imagem redimensionada
+                        CGContextDrawImage(bitmapContext, CGRectMake(0, 0, targetWidth, targetHeight), originalImage);
+                        
+                        // Criar uma nova imagem a partir do bitmap
+                        CGImageRef resizedImage = CGBitmapContextCreateImage(bitmapContext);
+                        
+                        if (resizedImage) {
+                            // Liberar recursos
+                            CGImageRelease(originalImage);
+                            CGContextRelease(bitmapContext);
+                            CGColorSpaceRelease(colorSpace);
+                            
+                            writeLog(@"[HOOK] Substituição de CGImageRepresentation bem-sucedida com redimensionamento!");
+                            return resizedImage;
+                        }
+                        
+                        CGImageRelease(originalImage);
                     }
+                    
+                    CGContextRelease(bitmapContext);
                 }
                 
-                writeLog(@"[HOOK] Substituição de CGImageRepresentation bem-sucedida com redimensionamento!");
-                return cgImage;
+                CGColorSpaceRelease(colorSpace);
             }
         }
         
@@ -175,6 +209,9 @@
         return %orig;
     }
     
+    // Garantir que temos uma resolução válida
+    ensureCameraResolutionAvailable();
+    
     // Obter o frame atual
     CMSampleBufferRef buffer = [GetFrame getCurrentFrame:nil replace:YES];
     if (buffer && CMSampleBufferIsValid(buffer)) {
@@ -199,11 +236,17 @@
                     
                     // Criar novo pixel buffer com dimensões da câmera real
                     CVPixelBufferRef scaledBuffer = NULL;
+                    NSDictionary *options = @{
+                        (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
+                        (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
+                    };
+                    
                     CVReturn result = CVPixelBufferCreate(kCFAllocatorDefault,
                                                         g_originalCameraResolution.width,
                                                         g_originalCameraResolution.height,
                                                         CVPixelBufferGetPixelFormatType(imageBuffer),
-                                                        NULL, &scaledBuffer);
+                                                        (__bridge CFDictionaryRef)options,
+                                                        &scaledBuffer);
                     
                     if (result == kCVReturnSuccess && scaledBuffer) {
                         // Bloquear buffers para acesso
@@ -232,6 +275,9 @@
                             CGImageRef cgImage = [ciContext createCGImage:ciImage fromRect:ciImage.extent];
                             
                             if (cgImage) {
+                                // Configurar alta qualidade de interpolação
+                                CGContextSetInterpolationQuality(destContext, kCGInterpolationHigh);
+                                
                                 // Desenhar redimensionado
                                 CGContextDrawImage(destContext,
                                                 CGRectMake(0, 0, g_originalCameraResolution.width, g_originalCameraResolution.height),
@@ -278,6 +324,9 @@
         return %orig;
     }
     
+    // Garantir que temos uma resolução válida
+    ensureCameraResolutionAvailable();
+    
     // Obter o frame atual - usamos replace:YES para garantir que obtemos um frame atualizado
     CMSampleBufferRef buffer = [GetFrame getCurrentFrame:nil replace:YES];
     if (buffer && CMSampleBufferIsValid(buffer)) {
@@ -318,74 +367,140 @@
                         width, height,
                         g_originalCameraResolution.width, g_originalCameraResolution.height);
                 
-                // Aplicar transformação de escala
-                ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(
-                    g_originalCameraResolution.width / width,
-                    g_originalCameraResolution.height / height)];
+                // IMPLEMENTAÇÃO DIRETA: criar UIImage, redimensionar e converter de volta
+                CIContext *context = [CIContext contextWithOptions:nil];
+                CGImageRef originalCGImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+                
+                if (originalCGImage) {
+                    // Criar um bitmap context com as dimensões desejadas
+                    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+                    size_t bitsPerComponent = 8;
+                    size_t bytesPerRow = 4 * (size_t)g_originalCameraResolution.width; // 4 bytes por pixel (RGBA)
+                    
+                    CGContextRef bitmapContext = CGBitmapContextCreate(
+                        NULL, // Dados - NULL para alocar automaticamente
+                        g_originalCameraResolution.width,
+                        g_originalCameraResolution.height,
+                        bitsPerComponent,
+                        bytesPerRow,
+                        colorSpace,
+                        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+                    );
+                    
+                    if (bitmapContext) {
+                        // Desenhar a imagem redimensionada
+                        CGContextDrawImage(
+                            bitmapContext,
+                            CGRectMake(0, 0, g_originalCameraResolution.width, g_originalCameraResolution.height),
+                            originalCGImage
+                        );
+                        
+                        // Criar uma nova imagem a partir do contexto
+                        CGImageRef resizedCGImage = CGBitmapContextCreateImage(bitmapContext);
+                        
+                        if (resizedCGImage) {
+                            // Substituir a imagem original
+                            ciImage = [CIImage imageWithCGImage:resizedCGImage];
+                            CGImageRelease(resizedCGImage);
+                            
+                            writeLog(@"[HOOK] Redimensionamento bem-sucedido para %.0f x %.0f",
+                                    g_originalCameraResolution.width, g_originalCameraResolution.height);
+                        }
+                        
+                        // Liberar recursos
+                        CGContextRelease(bitmapContext);
+                    }
+                    
+                    CGColorSpaceRelease(colorSpace);
+                    CGImageRelease(originalCGImage);
+                }
             }
-        }
-        
-        // Converter para UIImage com mais precisão
-        CIContext *context = [CIContext contextWithOptions:nil];
-        CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
-        if (!cgImage) {
-            writeLog(@"[HOOK] Falha: cgImage é NULL");
-            return %orig;
-        }
-        
-        UIImage *image = [UIImage imageWithCGImage:cgImage];
-        CGImageRelease(cgImage);
-        
-        if (!image) {
-            writeLog(@"[HOOK] Falha: image é NULL");
-            return %orig;
         }
         
         // Aplicar rotação baseada na orientação do vídeo
         if (g_isVideoOrientationSet) {
             UIImageOrientation orientation = UIImageOrientationUp;
             
+            // Mapeamento corrigido para orientação
             switch (g_videoOrientation) {
                 case 1: // Portrait
+                    writeLog(@"[HOOK] Orientação: Portrait");
                     orientation = UIImageOrientationUp;
                     break;
                 case 2: // Portrait upside down
+                    writeLog(@"[HOOK] Orientação: Portrait Upside Down");
                     orientation = UIImageOrientationDown;
                     break;
                 case 3: // Landscape right
-                    orientation = UIImageOrientationRight;
-                    break;
-                case 4: // Landscape left
+                    writeLog(@"[HOOK] Orientação: Landscape Right -> Rotacionando para Left");
+                    // A orientação UIImage é inversa do que se espera logicamente
                     orientation = UIImageOrientationLeft;
                     break;
+                case 4: // Landscape left
+                    writeLog(@"[HOOK] Orientação: Landscape Left -> Rotacionando para Right");
+                    // A orientação UIImage é inversa do que se espera logicamente
+                    orientation = UIImageOrientationRight;
+                    break;
+                default:
+                    writeLog(@"[HOOK] Orientação desconhecida: %d", g_videoOrientation);
+                    break;
             }
             
-            if (orientation != UIImageOrientationUp) {
-                image = [UIImage imageWithCGImage:image.CGImage
-                                        scale:image.scale
-                                    orientation:orientation];
-                writeLog(@"[HOOK] Aplicada rotação para orientação: %d", g_videoOrientation);
-            }
-        }
-        
-        // Converter para JPEG data com alta qualidade
-        NSData *jpegData = UIImageJPEGRepresentation(image, 1.0);
-        
-        if (jpegData) {
-            writeLog(@"[HOOK] Substituição de fileDataRepresentation bem-sucedida! Tamanho: %zu bytes", jpegData.length);
+            writeLog(@"[HOOK] Orientação detectada: %d, aplicando UIImageOrientation: %d",
+                    g_videoOrientation, (int)orientation);
             
-            // Verificar e copiar metadados importantes se disponíveis
-            NSData *originalData = %orig;
-            if (originalData) {
-                // Tentar preservar metadados EXIF da imagem original
-                // Esta parte é complexa e pode exigir uma biblioteca adicional como ImageIO
-                // para uma implementação completa.
-                writeLog(@"[HOOK] Dados originais disponíveis, tamanho: %zu bytes", originalData.length);
-            }
+            // Converter para UIImage com mais precisão
+            CIContext *context = [CIContext contextWithOptions:nil];
+            CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
             
-            return jpegData;
+            if (cgImage) {
+                // Criar uma UIImage com a orientação correta
+                UIImage *image = [UIImage imageWithCGImage:cgImage scale:1.0 orientation:orientation];
+                CGImageRelease(cgImage);
+                
+                if (image) {
+                    // Converter para JPEG data com alta qualidade
+                    NSData *jpegData = UIImageJPEGRepresentation(image, 1.0);
+                    
+                    if (jpegData) {
+                        writeLog(@"[HOOK] Rotação aplicada com sucesso");
+                        writeLog(@"[HOOK] Substituição de fileDataRepresentation bem-sucedida! Tamanho: %zu bytes", jpegData.length);
+                        
+                        // Verificar e copiar metadados importantes se disponíveis
+                        NSData *originalData = %orig;
+                        if (originalData) {
+                            // Tentar preservar metadados EXIF da imagem original
+                            // Esta parte é complexa e pode exigir uma biblioteca adicional como ImageIO
+                            // para uma implementação completa.
+                            writeLog(@"[HOOK] Dados originais disponíveis, tamanho: %zu bytes", originalData.length);
+                        }
+                        
+                        return jpegData;
+                    } else {
+                        writeLog(@"[HOOK] Falha ao gerar JPEG data após rotação");
+                    }
+                } else {
+                    writeLog(@"[HOOK] Falha: image é NULL após rotação");
+                }
+            } else {
+                writeLog(@"[HOOK] Falha: cgImage é NULL");
+            }
         } else {
-            writeLog(@"[HOOK] Falha ao gerar JPEG data");
+            // Se a orientação não estiver definida, apenas criar uma imagem normal
+            CIContext *context = [CIContext contextWithOptions:nil];
+            CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+            if (cgImage) {
+                UIImage *image = [UIImage imageWithCGImage:cgImage];
+                CGImageRelease(cgImage);
+                
+                if (image) {
+                    NSData *jpegData = UIImageJPEGRepresentation(image, 1.0);
+                    if (jpegData) {
+                        writeLog(@"[HOOK] Substituição de fileDataRepresentation bem-sucedida! Tamanho: %zu bytes", jpegData.length);
+                        return jpegData;
+                    }
+                }
+            }
         }
     } else {
         writeLog(@"[HOOK] Não foi possível obter buffer válido para fileDataRepresentation");
@@ -401,6 +516,9 @@
     if (![[VirtualCameraController sharedInstance] isActive]) {
         return %orig;
     }
+    
+    // Garantir que temos uma resolução válida
+    ensureCameraResolutionAvailable();
     
     // Obter o frame atual
     CMSampleBufferRef buffer = [GetFrame getCurrentFrame:nil replace:YES];
@@ -441,28 +559,61 @@
                         mjpegWidth, mjpegHeight,
                         g_originalCameraResolution.width, g_originalCameraResolution.height);
                 
-                // Aplicar transformação de escala
-                ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(
-                    g_originalCameraResolution.width / mjpegWidth,
-                    g_originalCameraResolution.height / mjpegHeight)];
+                // Usar a implementação robusta de redimensionamento
+                // Criar contexto de bitmap com dimensões corretas
+                size_t targetWidth = g_originalCameraResolution.width;
+                size_t targetHeight = g_originalCameraResolution.height;
+                
+                // Certificar-se de que targetWidth e targetHeight são números pares
+                targetWidth = (targetWidth % 2 == 0) ? targetWidth : targetWidth + 1;
+                targetHeight = (targetHeight % 2 == 0) ? targetHeight : targetHeight + 1;
+                
+                // Criar contexto para desenhar a imagem redimensionada
+                CIContext *context = [CIContext contextWithOptions:nil];
+                CGImageRef originalImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+                
+                if (originalImage) {
+                    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+                    CGContextRef bitmapContext = CGBitmapContextCreate(NULL,
+                                                                targetWidth,
+                                                                targetHeight,
+                                                                8, // bits por componente
+                                                                0, // bytes por linha (0 = automático)
+                                                                colorSpace,
+                                                                kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+                    
+                    if (bitmapContext) {
+                        // Alta qualidade de interpolação para melhor resultado
+                        CGContextSetInterpolationQuality(bitmapContext, kCGInterpolationHigh);
+                        
+                        // Desenhar a imagem redimensionada
+                        CGContextDrawImage(bitmapContext, CGRectMake(0, 0, targetWidth, targetHeight), originalImage);
+                        
+                        // Criar uma nova imagem CG a partir do contexto
+                        CGImageRef resizedImage = CGBitmapContextCreateImage(bitmapContext);
+                        
+                        if (resizedImage) {
+                            // Converter para CIImage para continuar o processamento
+                            ciImage = [CIImage imageWithCGImage:resizedImage];
+                            
+                            // Liberar recursos
+                            CGImageRelease(resizedImage);
+                        }
+                        
+                        CGContextRelease(bitmapContext);
+                    }
+                    
+                    CGColorSpaceRelease(colorSpace);
+                    CGImageRelease(originalImage);
+                }
             }
         }
         
-        // Converter para UIImage
-        CIContext *context = [CIContext contextWithOptions:nil];
-        CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
-        if (!cgImage) {
-            writeLog(@"[HOOK] Falha: cgImage é NULL");
-            return %orig;
-        }
-        
-        UIImage *image = [UIImage imageWithCGImage:cgImage];
-        CGImageRelease(cgImage);
-        
         // Aplicar rotação baseada na orientação do vídeo
-        if (g_isVideoOrientationSet && image) {
+        if (g_isVideoOrientationSet) {
             UIImageOrientation orientation = UIImageOrientationUp;
             
+            // Mapeamento corrigido para orientação
             switch (g_videoOrientation) {
                 case 1: // Portrait
                     orientation = UIImageOrientationUp;
@@ -471,41 +622,44 @@
                     orientation = UIImageOrientationDown;
                     break;
                 case 3: // Landscape right
-                    orientation = UIImageOrientationRight;
+                    orientation = UIImageOrientationLeft; // Correção: invertido para lógica de UIImage
                     break;
                 case 4: // Landscape left
-                    orientation = UIImageOrientationLeft;
+                    orientation = UIImageOrientationRight; // Correção: invertido para lógica de UIImage
+                    break;
+                default:
+                    orientation = UIImageOrientationUp;
                     break;
             }
             
-            if (orientation != UIImageOrientationUp) {
-                image = [UIImage imageWithCGImage:image.CGImage
-                                           scale:image.scale
-                                     orientation:orientation];
-                writeLog(@"[HOOK] Aplicada rotação para orientação: %d", g_videoOrientation);
+            // Converter para UIImage
+            CIContext *context = [CIContext contextWithOptions:nil];
+            CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+            if (cgImage) {
+                UIImage *image = [UIImage imageWithCGImage:cgImage
+                                                   scale:1.0
+                                             orientation:orientation];
+                CGImageRelease(cgImage);
+                
+                if (image) {
+                    // Se temos um customizador, tentar aplicá-lo
+                    if (customizer) {
+                        // Esta parte é complexa e pode exigir uma implementação específica
+                        // dependendo do que o customizador faz. Aqui apenas notificamos.
+                        writeLog(@"[HOOK] Customizador fornecido, mas não aplicado diretamente");
+                    }
+                    
+                    // Converter para JPEG data com alta qualidade
+                    NSData *jpegData = UIImageJPEGRepresentation(image, 1.0);
+                    
+                    if (jpegData) {
+                        writeLog(@"[HOOK] Substituição de fileDataRepresentationWithCustomizer bem-sucedida!");
+                        return jpegData;
+                    } else {
+                        writeLog(@"[HOOK] Falha ao gerar JPEG data");
+                    }
+                }
             }
-        }
-        
-        if (!image) {
-            writeLog(@"[HOOK] Falha: image é NULL após rotação");
-            return %orig;
-        }
-        
-        // Se temos um customizador, tentar aplicá-lo
-        if (customizer) {
-            // Esta parte é complexa e pode exigir uma implementação específica
-            // dependendo do que o customizador faz. Aqui apenas notificamos.
-            writeLog(@"[HOOK] Customizador fornecido, mas não aplicado diretamente");
-        }
-        
-        // Converter para JPEG data com alta qualidade
-        NSData *jpegData = UIImageJPEGRepresentation(image, 1.0);
-        
-        if (jpegData) {
-            writeLog(@"[HOOK] Substituição de fileDataRepresentationWithCustomizer bem-sucedida!");
-            return jpegData;
-        } else {
-            writeLog(@"[HOOK] Falha ao gerar JPEG data");
         }
     }
     
