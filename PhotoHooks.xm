@@ -8,11 +8,11 @@ static void ensureCameraResolutionAvailable() {
     if (CGSizeEqualToSize(g_originalCameraResolution, CGSizeZero)) {
         // Se não detectou a resolução, usar valores padrão para o iPhone
         if (g_usingFrontCamera) {
-            g_originalCameraResolution = CGSizeMake(2320, 3088); // Valores comuns para câmeras frontais em iPhones modernos
+            g_originalCameraResolution = CGSizeMake(960, 1280); // Valores comuns para câmeras frontais em iPhones modernos
             writeLog(@"[HOOK] Usando resolução padrão da câmera frontal: %.0f x %.0f",
                     g_originalCameraResolution.width, g_originalCameraResolution.height);
         } else {
-            g_originalCameraResolution = CGSizeMake(3024, 4032); // Valores comuns para câmeras traseiras em iPhones modernos
+            g_originalCameraResolution = CGSizeMake(1080, 1920); // Valores comuns para câmeras traseiras em iPhones modernos
             writeLog(@"[HOOK] Usando resolução padrão da câmera traseira: %.0f x %.0f",
                     g_originalCameraResolution.width, g_originalCameraResolution.height);
         }

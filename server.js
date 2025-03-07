@@ -89,9 +89,9 @@ const server = http.createServer(app);
 // Configurações avançadas
 const PORT = 8080;
 const FRAME_RATE = 30;
-const QUALITY = 90; // Aumentado para melhor qualidade (já que vamos usar resolução maior)
-const WIDTH = 1920;
-const HEIGHT = 1080;
+const QUALITY = 100;
+const WIDTH = 1280;
+const HEIGHT = 960;
 const BUFFER_SIZE = 5; // Número de frames a manter em buffer para suavizar entrega
 const KEEP_ALIVE_TIMEOUT = 30000; // Timeout para keep-alive em ms
 
