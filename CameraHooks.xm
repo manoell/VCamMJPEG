@@ -28,37 +28,22 @@ static void updateCurrentCameraResolution() {
     
     // Depois ativar o controlador com segurança
     @try {
-        // Verificar se o tweak está ativado nas preferências compartilhadas
-        BOOL isEnabled = [SharedPreferences isTweakEnabled];
+        VirtualCameraController *controller = [VirtualCameraController sharedInstance];
         
-        writeLog(@"[HOOK] Verificando status: SharedPreferences isEnabled=%d", isEnabled);
+        writeLog(@"[HOOK] Ativando VirtualCameraController após AVCaptureSession.startRunning");
+        [controller startCapturing];
         
-        if (isEnabled) {
-            writeLog(@"[HOOK] Tweak está ativado, ativando VirtualCameraController");
-            
-            VirtualCameraController *controller = [VirtualCameraController sharedInstance];
-            writeLog(@"[HOOK] Ativando VirtualCameraController após AVCaptureSession.startRunning");
-            [controller startCapturing];
-            
-            // Registrar status atual
-            writeLog(@"[HOOK] VirtualCameraController ativo: %d", controller.isActive);
-            
-            // Ativar conexão MJPEG se necessário
-            MJPEGReader *reader = [MJPEGReader sharedInstance];
-            if (!reader.isConnected) {
-                NSString *serverURL = [SharedPreferences serverURL];
-                if (serverURL) {
-                    writeLog(@"[HOOK] Iniciando conexão MJPEG após AVCaptureSession.startRunning com URL: %@", serverURL);
-                    [reader startStreamingFromURL:[NSURL URLWithString:serverURL]];
-                } else {
-                    writeLog(@"[HOOK] Não foi possível obter URL do servidor das preferências compartilhadas");
-                }
-            }
-            
-            writeLog(@"[HOOK] MJPEGReader conectado: %d", reader.isConnected);
-        } else {
-            writeLog(@"[HOOK] VirtualCameraController não foi ativado (Camera virtual desativada via SharedPreferences)");
+        // Registrar status atual
+        writeLog(@"[HOOK] VirtualCameraController ativo: %d", controller.isActive);
+        
+        // Ativar conexão MJPEG se necessário
+        MJPEGReader *reader = [MJPEGReader sharedInstance];
+        if (!reader.isConnected) {
+            writeLog(@"[HOOK] Iniciando conexão MJPEG após AVCaptureSession.startRunning");
+            [reader startStreamingFromURL:[NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"]];
         }
+        
+        writeLog(@"[HOOK] MJPEGReader conectado: %d", reader.isConnected);
     } @catch (NSException *exception) {
         writeLog(@"[HOOK] Erro após startRunning: %@", exception);
     }
@@ -149,7 +134,16 @@ static void updateCurrentCameraResolution() {
     writeLog(@"[HOOK] AVCaptureVideoDataOutput setSampleBufferDelegate: %@",
              NSStringFromClass([sampleBufferDelegate class]));
     
-    %orig;
+    // Criar um proxy para o delegado original
+    if (sampleBufferDelegate && [[VirtualCameraController sharedInstance] isActive]) {
+        // Usar objc_setAssociatedObject para associar o delegado original
+        objc_setAssociatedObject(sampleBufferDelegate, "originalDelegate", sampleBufferDelegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
+        // Chamar o método original com o delegado interceptado
+        %orig;
+    } else {
+        %orig;
+    }
 }
 
 %end
@@ -175,79 +169,24 @@ static void updateCurrentCameraResolution() {
         return %orig;
     }
     
-    // Log do tipo de objeto para ajudar na depuração
-    static BOOL loggedClass = NO;
-    if (!loggedClass) {
-        writeLog(@"[HOOK] captureOutput chamado em objeto do tipo: %@", NSStringFromClass([self class]));
-        loggedClass = YES;
-    }
-    
-    // Verificar se output é AVCaptureVideoDataOutput
-    BOOL isVideoOutput = [output isKindOfClass:[AVCaptureVideoDataOutput class]];
-    static BOOL loggedOutputType = NO;
-    if (!loggedOutputType) {
-        writeLog(@"[HOOK] captureOutput com output de tipo: %@, isVideoOutput=%d",
-                 NSStringFromClass([output class]), isVideoOutput);
-        loggedOutputType = YES;
-    }
-    
     // Verificar se a substituição da câmera está ativa
-    BOOL isEnabled = [SharedPreferences isTweakEnabled];
-    if (!isEnabled) {
-        if (!loggedClass) {
-            writeLog(@"[HOOK] Tweak não está ativado via SharedPreferences");
-        }
-        return %orig;
-    }
-    
     if (![[VirtualCameraController sharedInstance] isActive]) {
-        if (!loggedClass) {
-            writeLog(@"[HOOK] VirtualCameraController não está ativo");
-        }
         return %orig;
-    }
-    
-    // Apenas substituir frames de vídeo, não de áudio
-    if (!isVideoOutput) {
-        return %orig;
-    }
-    
-    // Log para mostrar que estamos entrando na substituição
-    static int frameReplaceCount = 0;
-    if (++frameReplaceCount % 100 == 0) {
-        writeLog(@"[HOOK] Substituindo frame #%d em captureOutput", frameReplaceCount);
     }
     
     // Obter informações de orientação do vídeo
     g_videoOrientation = (int)connection.videoOrientation;
     
-    // Obter buffer de substituição com log
-    CMSampleBufferRef mjpegBuffer = NULL;
-    @try {
-        mjpegBuffer = [GetFrame getCurrentFrame:sampleBuffer replace:YES];
-        
-        if (frameReplaceCount == 1) {
-            writeLog(@"[HOOK] getCurrentFrame retornou: %@", mjpegBuffer ? @"buffer válido" : @"NULL");
-        }
-    } @catch (NSException *e) {
-        writeLog(@"[HOOK] Exceção ao chamar getCurrentFrame: %@", e);
-    }
+    // Obter buffer de substituição
+    CMSampleBufferRef mjpegBuffer = [GetFrame getCurrentFrame:sampleBuffer replace:YES];
     
     if (mjpegBuffer && CMSampleBufferIsValid(mjpegBuffer)) {
-        // Log para primeiro frame substituído
-        if (frameReplaceCount == 1) {
-            writeLog(@"[HOOK] Primeiro frame substituído com sucesso!");
-        }
-        
         // Chamar o método original com o buffer MJPEG
         %orig(output, mjpegBuffer, connection);
         
         // Não liberar mjpegBuffer pois o método original vai usá-lo
     } else {
         // Se não conseguimos substituir, usar o original
-        if (frameReplaceCount % 100 == 0 || frameReplaceCount == 1) {
-            writeLog(@"[HOOK] Falha ao obter buffer MJPEG válido, usando original");
-        }
         %orig;
     }
 }

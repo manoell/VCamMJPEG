@@ -8,7 +8,6 @@
 #import "MJPEGPreviewWindow.h"
 #import "VirtualCameraController.h"
 #import "GetFrame.h"
-#import "SharedPreferences.h"
 #import <objc/runtime.h>
 #import "Globals.h"
 

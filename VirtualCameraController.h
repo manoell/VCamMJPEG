@@ -27,7 +27,7 @@
 + (CMSampleBufferRef)replaceCameraSampleBuffer:(CMSampleBufferRef)originalBuffer withMJPEGBuffer:(CMSampleBufferRef)mjpegBuffer;
 @end
 
-// Proxy para captura de foto
+// Adicionado - Proxy para captura de foto
 @interface AVCapturePhotoProxy : NSObject <AVCapturePhotoCaptureDelegate>
 @property (nonatomic, strong) id<AVCapturePhotoCaptureDelegate> originalDelegate;
 + (instancetype)proxyWithDelegate:(id<AVCapturePhotoCaptureDelegate>)delegate;

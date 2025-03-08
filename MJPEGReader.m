@@ -3,9 +3,8 @@
 #import "logger.h"
 #import "VirtualCameraController.h"
 
-// Indica se alguma instância já está conectada - GLOBAL
-BOOL gGlobalReaderConnected = NO;
-
+// Indica se alguma instância já está conectada
+static BOOL gGlobalReaderConnected = NO;
 // URL do servidor atual
 static NSString *gCurrentServerURL = nil;
 
@@ -13,9 +12,7 @@ static NSString *gCurrentServerURL = nil;
 // Usar um tipo normal em vez de property para dispatch_queue_t
 {
     dispatch_queue_t _processingQueue;
-    dispatch_queue_t _highPriorityQueue; // Fila de alta prioridade
-    NSDate *_lastConnectionAttempt;      // Timestamp da última tentativa
-    NSTimeInterval _connectionBackoff;    // Tempo de espera para reconexão
+    dispatch_queue_t _highPriorityQueue; // Nova fila de alta prioridade
 }
 @end
 
@@ -50,10 +47,6 @@ static NSString *gCurrentServerURL = nil;
         self.lastReceivedSampleBuffer = NULL;
         self.highPriorityMode = NO;
         
-        // Valores iniciais para o controle de reconexão
-        _lastConnectionAttempt = [NSDate distantPast];
-        _connectionBackoff = 1.0; // Começa com 1 segundo
-        
         // Criar a fila de processamento como variável de instância
         _processingQueue = dispatch_queue_create("com.vcam.mjpeg.processing", DISPATCH_QUEUE_SERIAL);
         
@@ -80,125 +73,108 @@ static NSString *gCurrentServerURL = nil;
 }
 
 - (void)startStreamingFromURL:(NSURL *)url {
-    @synchronized(self) {
-        @try {
-            // Log inicial do estado
-            writeLog(@"[MJPEG] startStreamingFromURL: url=%@, gGlobalReaderConnected=%d, self.isConnected=%d, self.dataTask=%@",
-                     url.absoluteString, gGlobalReaderConnected, self.isConnected, self.dataTask ? @"válido" : @"nulo");
-            
-            // CORREÇÃO: Modificar verificação para permitir reconexão
-            if (gGlobalReaderConnected && [url.absoluteString isEqualToString:gCurrentServerURL] &&
-                self.isConnected && self.dataTask != nil) {
-                writeLog(@"[MJPEG] Já existe uma conexão ativa e válida para %@", url.absoluteString);
+    static NSLock *connectionLock = nil;
+    static dispatch_once_t onceToken;
+    
+    dispatch_once(&onceToken, ^{
+        connectionLock = [[NSLock alloc] init];
+    });
+    
+    [connectionLock lock];
+    
+    @try {
+        // Adicionar log para debug
+        writeLog(@"[MJPEG] Verificando conexão para URL: %@, gGlobalReaderConnected: %d",
+                 url.absoluteString, gGlobalReaderConnected);
+        
+        // Se já existe uma conexão global ativa, não iniciar nova
+        if (gGlobalReaderConnected) {
+            if ([url.absoluteString isEqualToString:gCurrentServerURL]) {
+                writeLog(@"[MJPEG] Já existe uma conexão global ativa para %@, reutilizando", url.absoluteString);
+                self.isConnected = YES;
+                self.currentURL = url;
+                [connectionLock unlock];
                 return;
+            } else {
+                // Se a URL for diferente, fechar a conexão atual primeiro
+                writeLog(@"[MJPEG] Fechando conexão existente para abrir nova URL");
+                [self stopStreaming];
             }
-            
-            // Verificar o tempo desde a última tentativa (prevenção de reconexões frequentes)
-            NSTimeInterval timeSinceLastAttempt = -[_lastConnectionAttempt timeIntervalSinceNow];
-            if (timeSinceLastAttempt < _connectionBackoff && self.isReconnecting) {
-                writeLog(@"[MJPEG] Tentativa de reconexão muito frequente (%.1fs < %.1fs). Aguardando...",
-                        timeSinceLastAttempt, _connectionBackoff);
-                return;
-            }
-            
-            // Atualizar timestamp da tentativa de conexão
-            _lastConnectionAttempt = [NSDate date];
-            
-            // Evitar múltiplas reconexões simultâneas
-            if (self.isReconnecting) {
-                writeLog(@"[MJPEG] Já está reconectando, ignorando solicitação para: %@", url.absoluteString);
-                return;
-            }
-            
-            self.isReconnecting = YES;
-            
-            // Se estiver conectado a outra URL, desconecta primeiro
-            [self stopStreaming];
-            
-            // Armazena a URL atual globalmente
-            self.currentURL = url;
-            gCurrentServerURL = url.absoluteString;
-            
-            writeLog(@"[MJPEG] Iniciando streaming de: %@", url.absoluteString);
-            
-            self.buffer = [NSMutableData data];
-            
-            // Garantir que o callback esteja configurado para GetFrame
-            if (!self.sampleBufferCallback) {
-                writeLog(@"[MJPEG] sampleBufferCallback não estava configurado. Configurando para GetFrame.");
-                
-                self.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
-                    // Enviar o buffer para GetFrame
-                    [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
-                };
-            }
-            
-            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-            [request setValue:@"multipart/x-mixed-replace" forHTTPHeaderField:@"Accept"];
-            [request setValue:@"keep-alive" forHTTPHeaderField:@"Connection"];
-            [request setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
-            
-            // Adicionar cabeçalhos para melhorar a performance do stream
-            [request setValue:@"video/x-motion-jpeg, multipart/x-mixed-replace" forHTTPHeaderField:@"Accept"];
-            [request setValue:@"*/*" forHTTPHeaderField:@"Accept-Encoding"];
-            
-            self.dataTask = [self.session dataTaskWithRequest:request];
-            [self.dataTask resume];
-            
-            // Configurar a prioridade da tarefa para alta
-            self.dataTask.priority = NSURLSessionTaskPriorityHigh;
-            
-            gGlobalReaderConnected = YES;
-            writeLog(@"[MJPEG] Tarefa de streaming iniciada com prioridade alta");
-            
-            // Resetar backoff se a conexão for bem sucedida (será definido como bem sucedida no callback didReceiveResponse)
-            _connectionBackoff = 1.0;
-            
-            // Log final do estado
-            writeLog(@"[MJPEG] Estado após iniciar streaming: gGlobalReaderConnected=%d, self.isConnected=%d",
-                     gGlobalReaderConnected, self.isConnected);
-        } @catch (NSException *exception) {
-            writeLog(@"[MJPEG] Erro ao iniciar streaming: %@", exception.reason);
-            
-            // Aumentar backoff exponencialmente até um limite de 30 segundos
-            _connectionBackoff = MIN(_connectionBackoff * 1.5, 30.0);
-            writeLog(@"[MJPEG] Backoff de reconexão ajustado para %.1f segundos", _connectionBackoff);
-        } @finally {
-            // Garantir que o estado de reconexão seja limpo após um tempo
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                self.isReconnecting = NO;
-            });
         }
+        
+        // Evitar múltiplas reconexões simultâneas
+        if (self.isReconnecting) {
+            writeLog(@"[MJPEG] Já está reconectando, ignorando solicitação para: %@", url.absoluteString);
+            [connectionLock unlock];
+            return;
+        }
+        
+        self.isReconnecting = YES;
+        
+        // Se estiver conectado a outra URL, desconecta primeiro
+        [self stopStreaming];
+        
+        // Armazena a URL atual globalmente
+        self.currentURL = url;
+        gCurrentServerURL = url.absoluteString;
+        
+        writeLog(@"[MJPEG] Iniciando streaming de: %@", url.absoluteString);
+        
+        self.buffer = [NSMutableData data];
+        
+        // Garantir que o callback esteja configurado para GetFrame
+        if (!self.sampleBufferCallback) {
+            writeLog(@"[MJPEG] sampleBufferCallback não estava configurado. Configurando para GetFrame.");
+            
+            self.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
+                // Enviar o buffer para GetFrame
+                [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
+            };
+        }
+        
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+        [request setValue:@"multipart/x-mixed-replace" forHTTPHeaderField:@"Accept"];
+        [request setValue:@"keep-alive" forHTTPHeaderField:@"Connection"];
+        [request setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+        
+        // Adicionar cabeçalhos para melhorar a performance do stream
+        [request setValue:@"video/x-motion-jpeg, multipart/x-mixed-replace" forHTTPHeaderField:@"Accept"];
+        [request setValue:@"*/*" forHTTPHeaderField:@"Accept-Encoding"];
+        
+        self.dataTask = [self.session dataTaskWithRequest:request];
+        [self.dataTask resume];
+        
+        // Configurar a prioridade da tarefa para alta
+        self.dataTask.priority = NSURLSessionTaskPriorityHigh;
+        
+        gGlobalReaderConnected = YES;
+        writeLog(@"[MJPEG] Tarefa de streaming iniciada com prioridade alta");
+    } @catch (NSException *exception) {
+        writeLog(@"[MJPEG] Erro ao iniciar streaming: %@", exception.reason);
+    } @finally {
+        // Garantir que o estado de reconexão seja limpo após um tempo
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            self.isReconnecting = NO;
+        });
+        
+        [connectionLock unlock];
     }
 }
 
 - (void)stopStreaming {
-    @synchronized(self) {
-        @try {
-            writeLog(@"[MJPEG] Parando streaming (isConnected=%d, gGlobalReaderConnected=%d)",
-                     self.isConnected, gGlobalReaderConnected);
-            
-            if (self.dataTask) {
-                writeLog(@"[MJPEG] Cancelando dataTask");
-                [self.dataTask cancel];
-                self.dataTask = nil;
-                self.isConnected = NO;
-                gGlobalReaderConnected = NO;
-                gCurrentServerURL = nil;
-            }
-            
-            if (self.lastReceivedSampleBuffer) {
-                CFRelease(self.lastReceivedSampleBuffer);
-                self.lastReceivedSampleBuffer = NULL;
-            }
-            
-            // Limpar o buffer
-            [self.buffer setLength:0];
-            
-            writeLog(@"[MJPEG] Streaming parado (isConnected=%d, gGlobalReaderConnected=%d)",
-                     self.isConnected, gGlobalReaderConnected);
-        } @catch (NSException *exception) {
-            writeLog(@"[MJPEG] Erro ao parar streaming: %@", exception);
+    @synchronized (self) {
+        if (self.dataTask) {
+            writeLog(@"[MJPEG] Parando streaming");
+            [self.dataTask cancel];
+            self.dataTask = nil;
+            self.isConnected = NO;
+            gGlobalReaderConnected = NO;
+            gCurrentServerURL = nil;
+        }
+        
+        if (self.lastReceivedSampleBuffer) {
+            CFRelease(self.lastReceivedSampleBuffer);
+            self.lastReceivedSampleBuffer = NULL;
         }
     }
 }
@@ -215,48 +191,34 @@ static NSString *gCurrentServerURL = nil;
 - (void)resetWithError:(NSError *)error {
     writeLog(@"[MJPEG] Resetando leitor devido a erro: %@", error.localizedDescription);
     
-    @synchronized(self) {
-        @try {
-            // Parar task atual
-            if (self.dataTask) {
-                [self.dataTask cancel];
-                self.dataTask = nil;
-            }
-            
-            // Limpar buffer
-            [self.buffer setLength:0];
-            
-            // Redefinir estado
-            self.isConnected = NO;
-            self.isReconnecting = NO;
-            
-            if (self.lastReceivedSampleBuffer) {
-                CFRelease(self.lastReceivedSampleBuffer);
-                self.lastReceivedSampleBuffer = NULL;
-            }
-            
-            // Aumentar o tempo de backoff exponencialmente até 30 segundos
-            _connectionBackoff = MIN(_connectionBackoff * 1.5, 30.0);
-            writeLog(@"[MJPEG] Backoff de reconexão ajustado para %.1f segundos", _connectionBackoff);
-        } @catch (NSException *exception) {
-            writeLog(@"[MJPEG] Erro durante reset: %@", exception);
+    @synchronized (self) {
+        // Parar task atual
+        if (self.dataTask) {
+            [self.dataTask cancel];
+            self.dataTask = nil;
+        }
+        
+        // Limpar buffer
+        [self.buffer setLength:0];
+        
+        // Redefinir estado
+        self.isConnected = NO;
+        self.isReconnecting = NO;
+        gGlobalReaderConnected = NO;
+        
+        if (self.lastReceivedSampleBuffer) {
+            CFRelease(self.lastReceivedSampleBuffer);
+            self.lastReceivedSampleBuffer = NULL;
         }
     }
     
-    // Verificar se ainda devemos tentar reconectar
-    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    
-    // Tentar reconectar automaticamente após o tempo de backoff
-    if (isEnabled && self.currentURL) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_connectionBackoff * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            writeLog(@"[MJPEG] Tentando reconectar automaticamente a %@ após backoff de %.1f segundos",
-                    self.currentURL, _connectionBackoff);
+    // Tentar reconectar automaticamente após um tempo
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self.currentURL) {
+            writeLog(@"[MJPEG] Tentando reconectar automaticamente a %@", self.currentURL);
             [self startStreamingFromURL:self.currentURL];
-        });
-    } else {
-        writeLog(@"[MJPEG] Tweak desativado ou sem URL, não tentando reconexão");
-        gGlobalReaderConnected = NO;
-    }
+        }
+    });
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
@@ -275,39 +237,13 @@ static NSString *gCurrentServerURL = nil;
             NSString *contentType = [httpResponse.allHeaderFields objectForKey:@"Content-Type"];
             if (contentType) {
                 writeLog(@"[MJPEG] Content-Type: %@", contentType);
-                
-                // Verificar se o tipo de conteúdo é compatível com MJPEG
-                BOOL isValidContentType = [contentType containsString:@"multipart/x-mixed-replace"] ||
-                                         [contentType containsString:@"image/jpeg"] ||
-                                         [contentType containsString:@"mjpeg"];
-                
-                if (!isValidContentType) {
-                    writeLog(@"[MJPEG] AVISO: Content-Type inesperado para MJPEG stream: %@", contentType);
-                }
-            }
-            
-            // Se o código não for 200, rejeitar
-            if (httpResponse.statusCode != 200) {
-                writeLog(@"[MJPEG] Erro: código de resposta HTTP inválido: %ld", (long)httpResponse.statusCode);
-                completionHandler(NSURLSessionResponseCancel);
-                // Reset após 2 segundos para permitir futuras tentativas
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    isProcessingResponse = NO;
-                });
-                return;
             }
         }
         
-        @synchronized(self) {
-            self.isConnected = YES;
-            self.isReconnecting = NO;
-            gGlobalReaderConnected = YES;
-            [self.buffer setLength:0];
-            
-            // Resetar o backoff para 1 segundo já que a conexão foi bem-sucedida
-            _connectionBackoff = 1.0;
-            writeLog(@"[MJPEG] Conexão bem-sucedida, backoff resetado para %.1f segundos", _connectionBackoff);
-        }
+        self.isConnected = YES;
+        self.isReconnecting = NO;
+        gGlobalReaderConnected = YES;
+        [self.buffer setLength:0];
         
         // Reset após 5 segundos
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -401,14 +337,14 @@ static NSString *gCurrentServerURL = nil;
 
 - (void)processJPEGData:(NSData *)jpegData {
     @autoreleasepool {
-        // Reduzir logs para evitar sobrecarga
+        // Adicionar log para saber se está recebendo frames - limitado a cada 300 frames
         static int frameCount = 0;
         frameCount++;
-        if (frameCount % 1000 == 0) {  // Reduzido para log a cada 1000 frames
+        if (frameCount % 300 == 0) {  // Log a cada 300 frames para não encher o log
             writeLog(@"[MJPEG] Processado frame #%d (%d bytes)", frameCount, (int)jpegData.length);
         }
         
-        // Criar imagem a partir dos dados JPEG
+        // Criar imagem a partir dos dados JPEG - mover para GetFrame para processamento mais eficiente
         UIImage *image = [UIImage imageWithData:jpegData];
         
         if (image) {
@@ -449,36 +385,15 @@ static NSString *gCurrentServerURL = nil;
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     if (error) {
-        if (error.code != NSURLErrorCancelled) { // Ignorar cancelamento intencional
+        if (error.code != NSURLErrorCancelled) { // Ignore cancelamento intencional
             writeLog(@"[MJPEG] Erro no streaming: %@", error);
             [self resetWithError:error];
-        } else {
-            writeLog(@"[MJPEG] Streaming cancelado intencionalmente");
-            @synchronized(self) {
-                self.isConnected = NO;
-                self.isReconnecting = NO;
-                self.dataTask = nil;
-                // Não alteramos gGlobalReaderConnected aqui para permitir que a janela de UI mostre o estado correto
-            }
         }
     } else {
-        writeLog(@"[MJPEG] Streaming concluído normalmente");
-        @synchronized(self) {
-            self.isConnected = NO;
-            self.isReconnecting = NO;
-            self.dataTask = nil;
-        }
-        
-        // Verificar se o tweak ainda está ativo para tentar reconectar
-        BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-        
-        // Se a tarefa terminou normalmente e o tweak ainda está ativo, tente reconectar
-        if (isEnabled && self.currentURL) {
-            writeLog(@"[MJPEG] Reconectando após finalização normal...");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [self startStreamingFromURL:self.currentURL];
-            });
-        }
+        writeLog(@"[MJPEG] Streaming concluído");
+        self.isConnected = NO;
+        self.isReconnecting = NO;
+        gGlobalReaderConnected = NO;
     }
 }
 

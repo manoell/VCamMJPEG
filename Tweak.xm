@@ -50,8 +50,7 @@ void detectCameraResolutions() {
 // Constructor - roda quando o tweak é carregado
 %ctor {
     @autoreleasepool {
-        // Restaurar nível de log para ajudar no debug
-        setLogLevel(5); // Mudando para nível DEBUG
+        setLogLevel(5); // Aumentado para nível DEBUG para mais detalhes
         
         NSString *processName = [NSProcessInfo processInfo].processName;
         writeLog(@"[INIT] VirtualCam MJPEG carregado em processo: %@", processName);
@@ -59,23 +58,24 @@ void detectCameraResolutions() {
         // Inicializar resoluções da câmera
         detectCameraResolutions();
         
-        // Inicializar o sharedInstance, mas não ativar automaticamente
-        [VirtualCameraController sharedInstance];
+        // Inicialização única dos componentes principais
+        VirtualCameraController *controller = [VirtualCameraController sharedInstance];
         
-        // CORREÇÃO: Verificar se o tweak deve ser ativado pelos NSUserDefaults
-        BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-        
-        // Log do estado ao iniciar
-        writeLog(@"[INIT] Estado inicial do tweak: isEnabled=%d, gGlobalReaderConnected=%d",
-                 isEnabled, gGlobalReaderConnected);
-        
-        // CORREÇÃO: Remover a redefinição forçada para outros processos
-        // Isso permite que a configuração seja mantida entre processos
-        
-        // Se estiver habilitado em NSUserDefaults, sincronizar com a variável global
-        if (isEnabled && !gGlobalReaderConnected) {
-            writeLog(@"[INIT] Sincronizando estado: NSUserDefaults indica ativado, atualizando gGlobalReaderConnected");
-            gGlobalReaderConnected = YES;
+        // Verificar se estamos em um aplicativo que usa a câmera
+        BOOL isCameraApp =
+            ([processName isEqualToString:@"Camera"] ||
+             [processName containsString:@"camera"] ||
+             [processName isEqualToString:@"Telegram"] ||
+             [processName isEqualToString:@"Facetime"] ||
+             [processName containsString:@"facetime"] ||
+             [processName isEqualToString:@"MobileSlideShow"]); // Adicionar app de fotos
+            
+        if (isCameraApp) {
+            writeLog(@"[INIT] Configurando hooks para app de câmera: %@", processName);
+            // Iniciar controller após um pequeno delay
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [controller startCapturing];
+            });
         }
         
         // Mostrar a janela de preview apenas no SpringBoard
@@ -83,42 +83,10 @@ void detectCameraResolutions() {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 writeLog(@"[INIT] Mostrando janela de preview em SpringBoard");
                 [[MJPEGPreviewWindow sharedInstance] show];
-                
-                // CORREÇÃO: Se o tweak estava ativado antes do respring, restaurar estado
-                if (isEnabled) {
-                    writeLog(@"[INIT] Tweak estava ativado antes do respring, restaurando estado");
-                    
-                    // Obter URL do servidor
-                    NSString *serverURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamMJPEG_ServerURL"];
-                    if (serverURL) {
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            writeLog(@"[INIT] Restaurando conexão MJPEG: %@", serverURL);
-                            
-                            // Atualizar interface
-                            MJPEGPreviewWindow *window = [MJPEGPreviewWindow sharedInstance];
-                            window.serverTextField.text = [serverURL stringByReplacingOccurrencesOfString:@"http://" withString:@""];
-                            
-                            // CORREÇÃO: Em vez de chamar diretamente o método privado, usar notificação
-                            // Isso simula um clique no botão
-                            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamMJPEG_Enabled"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                            
-                            // Ativar VirtualCameraController
-                            [[VirtualCameraController sharedInstance] startCapturing];
-                            
-                            // Ativar MJPEGReader
-                            NSURL *url = [NSURL URLWithString:serverURL];
-                            [[MJPEGReader sharedInstance] startStreamingFromURL:url];
-                            
-                            // Atualizar interface
-                            window.isConnected = YES;
-                            [window.connectButton setTitle:@"Desativar Câmera Virtual" forState:UIControlStateNormal];
-                            [window.connectButton setBackgroundColor:[UIColor colorWithRed:0.2 green:0.7 blue:0.2 alpha:0.9]];
-                            [window updateStatus:@"VirtualCam\nAtivo"];
-                        });
-                    }
-                }
             });
         }
+        
+        // Inicializar os grupos padrão - sem hooks específicos neste arquivo
+        %init(_ungrouped);
     }
 }

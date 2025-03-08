@@ -25,13 +25,6 @@ static void ensureCameraResolutionAvailable() {
 - (void)capturePhotoWithSettings:(AVCapturePhotoSettings *)settings delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
     writeLog(@"[HOOK] capturePhotoWithSettings:delegate: chamado");
     
-    // Verificar se o tweak está ativado
-    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    if (!isEnabled) {
-        %orig;
-        return;
-    }
-    
     // Verificar se a substituição da câmera está ativa
     if (![[VirtualCameraController sharedInstance] isActive]) {
         %orig;
@@ -91,17 +84,11 @@ static void ensureCameraResolutionAvailable() {
 
 %end
 
-// Hook para AVCapturePhoto - só processar quando o tweak estiver ativo
+// Hook para AVCapturePhoto
 %hook AVCapturePhoto
 
 - (CGImageRef)CGImageRepresentation {
     writeLog(@"[HOOK] CGImageRepresentation chamado");
-    
-    // Verificar se o tweak está ativado
-    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    if (!isEnabled) {
-        return %orig;
-    }
     
     // Verificar se a substituição da câmera está ativa
     if (![[VirtualCameraController sharedInstance] isActive]) {
@@ -217,12 +204,6 @@ static void ensureCameraResolutionAvailable() {
 - (CVPixelBufferRef)pixelBuffer {
     writeLog(@"[HOOK] pixelBuffer chamado");
     
-    // Verificar se o tweak está ativado
-    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    if (!isEnabled) {
-        return %orig;
-    }
-    
     // Verificar se a substituição da câmera está ativa
     if (![[VirtualCameraController sharedInstance] isActive]) {
         return %orig;
@@ -337,12 +318,6 @@ static void ensureCameraResolutionAvailable() {
 
 - (NSData *)fileDataRepresentation {
     writeLog(@"[HOOK] fileDataRepresentation chamado");
-    
-    // Verificar se o tweak está ativado
-    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    if (!isEnabled) {
-        return %orig;
-    }
     
     // Verificar se a substituição da câmera está ativa
     if (![[VirtualCameraController sharedInstance] isActive]) {
@@ -537,12 +512,6 @@ static void ensureCameraResolutionAvailable() {
 - (NSData *)fileDataRepresentationWithCustomizer:(id)customizer {
     writeLog(@"[HOOK] fileDataRepresentationWithCustomizer chamado");
     
-    // Verificar se o tweak está ativado
-    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    if (!isEnabled) {
-        return %orig;
-    }
-    
     // Verificar se a substituição da câmera está ativa
     if (![[VirtualCameraController sharedInstance] isActive]) {
         return %orig;
@@ -701,12 +670,6 @@ static void ensureCameraResolutionAvailable() {
 - (CVPixelBufferRef)previewPixelBuffer {
     writeLog(@"[HOOK] previewPixelBuffer chamado");
     
-    // Verificar se o tweak está ativado
-    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    if (!isEnabled) {
-        return %orig;
-    }
-    
     // Verificar se a substituição da câmera está ativa
     if (![[VirtualCameraController sharedInstance] isActive]) {
         return %orig;
@@ -730,14 +693,11 @@ static void ensureCameraResolutionAvailable() {
     return %orig;
 }
 
-%end // Fechando o hook para AVCapturePhoto
+%end
 
-%end // Fechando o grupo PhotoHooks
+%end // grupo PhotoHooks
 
 // Constructor específico deste arquivo
 %ctor {
-    // Inicializar os hooks só depois que tudo estiver carregado
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        %init(PhotoHooks);
-    });
+    %init(PhotoHooks);
 }
