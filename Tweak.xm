@@ -78,11 +78,12 @@ void detectCameraResolutions() {
             });
         }
         
-        // Mostrar a janela de preview apenas no SpringBoard
+        // Mostrar a janela de preview apenas no SpringBoard (já minimizada)
         if ([processName isEqualToString:@"SpringBoard"]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                writeLog(@"[INIT] Mostrando janela de preview em SpringBoard");
+                writeLog(@"[INIT] Mostrando janela de preview em SpringBoard (minimizada)");
                 [[MJPEGPreviewWindow sharedInstance] show];
+                // Já inicia minimizado por padrão, não é necessário chamar toggleExpanded
             });
         }
         
