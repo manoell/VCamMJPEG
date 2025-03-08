@@ -111,9 +111,13 @@ static BOOL gCaptureSystemActive = NO;
     // Verificar se o MJPEGReader está conectado
     MJPEGReader *reader = [MJPEGReader sharedInstance];
     if (!reader.isConnected) {
-        writeLog(@"[CAMERA] MJPEGReader não está conectado, tentando conectar...");
-        NSURL *url = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
-        [reader startStreamingFromURL:url];
+        writeLog(@"[CAMERA] MJPEGReader não está conectado, verificando URL atual");
+        if (reader.currentURL) {
+            writeLog(@"[CAMERA] Tentando reconectar com URL anterior: %@", reader.currentURL);
+            [reader startStreamingFromURL:reader.currentURL];
+        } else {
+            writeLog(@"[CAMERA] Nenhuma URL anterior disponível, aguardando configuração manual");
+        }
     }
     
     // Garantir que o callback esteja configurado
@@ -144,6 +148,11 @@ static BOOL gCaptureSystemActive = NO;
 
 // Método para obter o latest sample buffer (implementado para compatibilidade)
 - (CMSampleBufferRef)getLatestSampleBuffer {
+    // Verificar se o sistema está ativo
+    if (!self.isActive) {
+        return NULL;
+    }
+    
     static int callCount = 0;
     
     // Log limitado
@@ -157,6 +166,11 @@ static BOOL gCaptureSystemActive = NO;
 
 // Implementação específica para substituição de câmera
 - (CMSampleBufferRef)getLatestSampleBufferForSubstitution {
+    // Verificar se o sistema está ativo
+    if (!self.isActive) {
+        return NULL;
+    }
+    
     static int callCount = 0;
     
     // Log menos frequente
@@ -183,28 +197,6 @@ static BOOL gCaptureSystemActive = NO;
         // Log periódico
         if (_debugMode && (++_frameCounter % 300 == 0)) {
             writeLog(@"[CAMERA] Frame MJPEG #%d processado pelo VirtualCameraController", _frameCounter);
-            
-            // Debug info - formato do buffer
-            CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
-            if (formatDesc) {
-                FourCharCode mediaType = CMFormatDescriptionGetMediaType(formatDesc);
-                FourCharCode mediaSubType = CMFormatDescriptionGetMediaSubType(formatDesc);
-                char typeStr[5] = {0};
-                char subTypeStr[5] = {0};
-                
-                // Convertendo FourCharCode para string legível
-                typeStr[0] = (char)((mediaType >> 24) & 0xFF);
-                typeStr[1] = (char)((mediaType >> 16) & 0xFF);
-                typeStr[2] = (char)((mediaType >> 8) & 0xFF);
-                typeStr[3] = (char)(mediaType & 0xFF);
-                
-                subTypeStr[0] = (char)((mediaSubType >> 24) & 0xFF);
-                subTypeStr[1] = (char)((mediaSubType >> 16) & 0xFF);
-                subTypeStr[2] = (char)((mediaSubType >> 8) & 0xFF);
-                subTypeStr[3] = (char)(mediaSubType & 0xFF);
-                
-                writeLog(@"[CAMERA] Media Type: %s, SubType: %s", typeStr, subTypeStr);
-            }
             
             // Debug info - dimensões do frame
             CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
@@ -270,86 +262,41 @@ static BOOL gCaptureSystemActive = NO;
                 // Liberar o buffer anterior
                 CFRelease(resultBuffer);
                 resultBuffer = syncedBuffer;
+                
+                // Copiar também quaisquer metadados importantes do buffer original
+                CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(originalBuffer, true);
+                if (attachments != NULL && CFArrayGetCount(attachments) > 0) {
+                    CFDictionaryRef attachmentDict = (CFDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
+                    if (attachmentDict != NULL) {
+                        CFIndex count = CFDictionaryGetCount(attachmentDict);
+                        if (count > 0) {
+                            const void **keys = (const void **)malloc(count * sizeof(void *));
+                            const void **values = (const void **)malloc(count * sizeof(void *));
+                            
+                            CFDictionaryGetKeysAndValues(attachmentDict, keys, values);
+                            
+                            for (CFIndex i = 0; i < count; i++) {
+                                CFStringRef key = (CFStringRef)keys[i];
+                                CFTypeRef value = (CFTypeRef)values[i];
+                                
+                                // Anexar cada valor ao buffer sincronizado
+                                CMSetAttachment(resultBuffer, key, value, kCMAttachmentMode_ShouldPropagate);
+                            }
+                            
+                            free(keys);
+                            free(values);
+                        }
+                    }
+                }
             }
         } @catch (NSException *e) {
             // Em caso de erro, continuar com o buffer não sincronizado
+            writeLog(@"[CAMERA] Erro ao sincronizar timing: %@", e);
         }
     }
     
     // Retornar a cópia do buffer MJPEG (possivelmente com timing atualizado)
     return resultBuffer;
-}
-
-@end
-
-@implementation AVCapturePhotoProxy
-
-+ (instancetype)proxyWithDelegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
-    AVCapturePhotoProxy *proxy = [[AVCapturePhotoProxy alloc] init];
-    proxy.originalDelegate = delegate;
-    return proxy;
-}
-
-#pragma mark - AVCapturePhotoCaptureDelegate Methods
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-// iOS 10+
-- (void)captureOutput:(AVCapturePhotoOutput *)output didFinishProcessingPhotoSampleBuffer:(CMSampleBufferRef)photoSampleBuffer previewPhotoSampleBuffer:(CMSampleBufferRef)previewPhotoSampleBuffer resolvedSettings:(AVCaptureResolvedPhotoSettings *)resolvedSettings bracketSettings:(AVCaptureBracketedStillImageSettings *)bracketSettings error:(NSError *)error {
-    
-    if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didFinishProcessingPhotoSampleBuffer:previewPhotoSampleBuffer:resolvedSettings:bracketSettings:error:)]) {
-        
-        writeLog(@"[PHOTOPROXY] Interceptando didFinishProcessingPhotoSampleBuffer");
-        
-        // Obter buffer de substituição
-        CMSampleBufferRef mjpegBuffer = photoSampleBuffer ? [GetFrame getCurrentFrame:photoSampleBuffer replace:YES] : nil;
-        
-        if (mjpegBuffer && CMSampleBufferIsValid(mjpegBuffer)) {
-            writeLog(@"[PHOTOPROXY] Substituindo buffer na finalização da captura de foto");
-            
-            [self.originalDelegate captureOutput:output
-                didFinishProcessingPhotoSampleBuffer:mjpegBuffer
-                       previewPhotoSampleBuffer:previewPhotoSampleBuffer
-                             resolvedSettings:resolvedSettings
-                              bracketSettings:bracketSettings
-                                       error:error];
-        } else {
-            [self.originalDelegate captureOutput:output
-                didFinishProcessingPhotoSampleBuffer:photoSampleBuffer
-                       previewPhotoSampleBuffer:previewPhotoSampleBuffer
-                             resolvedSettings:resolvedSettings
-                              bracketSettings:bracketSettings
-                                       error:error];
-        }
-    }
-}
-#pragma clang diagnostic pop
-
-// iOS 11+
-- (void)captureOutput:(AVCapturePhotoOutput *)output didFinishProcessingPhoto:(AVCapturePhoto *)photo error:(NSError *)error {
-    if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didFinishProcessingPhoto:error:)]) {
-        
-        writeLog(@"[PHOTOPROXY] Interceptando didFinishProcessingPhoto");
-        
-        // Como não podemos modificar o AVCapturePhoto diretamente,
-        // apenas passamos para o delegate original
-        [self.originalDelegate captureOutput:output didFinishProcessingPhoto:photo error:error];
-    }
-}
-
-// Implementações para outros métodos do protocolo AVCapturePhotoCaptureDelegate
-// Adicione conforme necessário
-
-// Método para encaminhar mensagens desconhecidas para o delegate original
-- (BOOL)respondsToSelector:(SEL)aSelector {
-    return [super respondsToSelector:aSelector] || [self.originalDelegate respondsToSelector:aSelector];
-}
-
-- (id)forwardingTargetForSelector:(SEL)aSelector {
-    if ([self.originalDelegate respondsToSelector:aSelector]) {
-        return self.originalDelegate;
-    }
-    return [super forwardingTargetForSelector:aSelector];
 }
 
 @end

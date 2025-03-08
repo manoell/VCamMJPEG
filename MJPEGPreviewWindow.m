@@ -2,17 +2,24 @@
 #import "MJPEGReader.h"
 #import "logger.h"
 #import "VirtualCameraController.h"
+#import <notify.h>
 
 // URL do servidor MJPEG padrão
 static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
 
-@implementation MJPEGPreviewWindow
+@implementation MJPEGPreviewWindow {
+    UITapGestureRecognizer *_doubleTapGesture;
+    BOOL _isMinimized;
+    CGRect _normalFrame;
+    CGRect _minimizedFrame;
+    int _notifyToken;
+}
 
 + (instancetype)sharedInstance {
     static MJPEGPreviewWindow *sharedInstance = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        sharedInstance = [[self alloc] initWithFrame:CGRectMake(20, 60, 200, 320)];
+        sharedInstance = [[self alloc] initWithFrame:CGRectMake(20, 60, 200, 120)];
     });
     return sharedInstance;
 }
@@ -21,52 +28,27 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
     self = [super initWithFrame:frame];
     if (self) {
         // Configuração básica - reduzir nível da janela
-        self.windowLevel = UIWindowLevelNormal + 50; // Em vez de UIWindowLevelAlert + 100
-        self.backgroundColor = [UIColor colorWithRed:0 green:0 blue:0.8 alpha:0.9];
+        self.windowLevel = UIWindowLevelNormal + 50;
+        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.9];
         self.layer.cornerRadius = 12;
         self.clipsToBounds = YES;
         self.hidden = YES;
         
+        // Salvar dimensões para minimizar/maximizar
+        _normalFrame = frame;
+        _minimizedFrame = CGRectMake(20, 60, 40, 40);
+        _isMinimized = NO;
+        
         // Status label
-        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 10, 180, 40)];
-        self.statusLabel.text = @"VirtualCam\nDesconectado";
+        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 10, 180, 30)];
+        self.statusLabel.text = @"VirtualCam";
         self.statusLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
         self.statusLabel.textColor = [UIColor whiteColor];
-        self.statusLabel.numberOfLines = 0;
         self.statusLabel.textAlignment = NSTextAlignmentCenter;
         [self addSubview:self.statusLabel];
         
-        // Preview image view - começa com hidden
-        self.previewImageView = [[UIImageView alloc] initWithFrame:CGRectMake(10, 60, 180, 120)];
-        self.previewImageView.backgroundColor = [UIColor blackColor];
-        self.previewImageView.contentMode = UIViewContentModeScaleAspectFit;
-        self.previewImageView.layer.cornerRadius = 6;
-        self.previewImageView.clipsToBounds = YES;
-        self.previewImageView.hidden = YES; // Inicialmente escondido
-        [self addSubview:self.previewImageView];
-        
-        // Botão para ativar/desativar preview
-        UIButton *previewToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        previewToggleButton.frame = CGRectMake(10, 60, 180, 30);
-        [previewToggleButton setTitle:@"Ativar Preview" forState:UIControlStateNormal];
-        previewToggleButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.3];
-        previewToggleButton.layer.cornerRadius = 6;
-        [previewToggleButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        [previewToggleButton addTarget:self action:@selector(togglePreview:) forControlEvents:UIControlEventTouchUpInside];
-        [self addSubview:previewToggleButton];
-        self.previewToggleButton = previewToggleButton;
-        
-        // FPS label - inicialmente escondido
-        self.fpsLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 190, 180, 20)];
-        self.fpsLabel.text = @"FPS: --";
-        self.fpsLabel.font = [UIFont systemFontOfSize:12];
-        self.fpsLabel.textColor = [UIColor whiteColor];
-        self.fpsLabel.textAlignment = NSTextAlignmentCenter;
-        self.fpsLabel.hidden = YES; // Inicialmente escondido
-        [self addSubview:self.fpsLabel];
-        
         // Servidor TextField
-        self.serverTextField = [[UITextField alloc] initWithFrame:CGRectMake(10, 220, 180, 25)];
+        self.serverTextField = [[UITextField alloc] initWithFrame:CGRectMake(10, 50, 180, 25)];
         self.serverTextField.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.2];
         self.serverTextField.textColor = [UIColor whiteColor];
         self.serverTextField.font = [UIFont systemFontOfSize:12];
@@ -79,98 +61,94 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
         self.serverTextField.leftViewMode = UITextFieldViewModeAlways;
         [self addSubview:self.serverTextField];
         
-        // Connect button
+        // Connect/Toggle button
         self.connectButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        self.connectButton.frame = CGRectMake(10, 255, 180, 25);
-        [self.connectButton setTitle:@"Conectar" forState:UIControlStateNormal];
-        self.connectButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.3];
+        self.connectButton.frame = CGRectMake(10, 85, 180, 25);
+        [self.connectButton setTitle:@"Ativar Câmera Virtual" forState:UIControlStateNormal];
+        self.connectButton.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9]; // Vermelho para desativado
         self.connectButton.layer.cornerRadius = 6;
         [self.connectButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         [self.connectButton addTarget:self action:@selector(connectButtonTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:self.connectButton];
         
-        // Botão de fechar/minimizar
-        UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        closeButton.frame = CGRectMake(10, 290, 180, 25);
-        [closeButton setTitle:@"Minimizar Interface" forState:UIControlStateNormal];
-        closeButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.3];
-        closeButton.layer.cornerRadius = 6;
-        [closeButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        [closeButton addTarget:self action:@selector(hideInterface) forControlEvents:UIControlEventTouchUpInside];
-        [self addSubview:closeButton];
-        
-        // Inicializar contadores de FPS
-        self.frameCount = 0;
-        self.lastFPSUpdate = [NSDate date];
-        
         // Adicionar gesture recognizer para arrastar
         self.panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:self.panGesture];
+        
+        // Gesture recognizer para minimizar com duplo toque
+        _doubleTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+        _doubleTapGesture.numberOfTapsRequired = 2;
+        [self addGestureRecognizer:_doubleTapGesture];
+        
+        // Registrar para receber notificações do Darwin
+        notify_register_dispatch("com.vcam.mjpeg.activation_status", &_notifyToken, dispatch_get_main_queue(), ^(int token) {
+            writeLog(@"[UI] Recebida notificação de status de ativação");
+            BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.isConnected = isEnabled;
+                if (isEnabled) {
+                    [self.connectButton setTitle:@"Desativar Câmera Virtual" forState:UIControlStateNormal];
+                    [self.connectButton setBackgroundColor:[UIColor colorWithRed:0.2 green:0.7 blue:0.2 alpha:0.9]];
+                    [self updateStatus:@"VirtualCam\nAtivo"];
+                } else {
+                    [self.connectButton setTitle:@"Ativar Câmera Virtual" forState:UIControlStateNormal];
+                    [self.connectButton setBackgroundColor:[UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9]];
+                    [self updateStatus:@"VirtualCam\nInativo"];
+                }
+            });
+        });
         
         writeLog(@"[UI] MJPEGPreviewWindow inicializado");
     }
     return self;
 }
 
-// Método para ativar/desativar a prévia
-- (void)togglePreview:(UIButton *)sender {
-    if (self.previewImageView.hidden) {
-        // Ativar preview
-        self.previewImageView.hidden = NO;
-        self.fpsLabel.hidden = NO;
-        [sender setTitle:@"Desativar Preview" forState:UIControlStateNormal];
-        
-        // Ajustar posição do botão para ficar embaixo do preview
-        CGRect frame = sender.frame;
-        frame.origin.y = 190;
-        sender.frame = frame;
+- (void)dealloc {
+    if (_notifyToken) {
+        notify_cancel(_notifyToken);
+    }
+}
+
+- (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
+    if (_isMinimized) {
+        [self maximizeWindow];
     } else {
-        // Desativar preview
-        self.previewImageView.hidden = YES;
-        self.fpsLabel.hidden = YES;
-        [sender setTitle:@"Ativar Preview" forState:UIControlStateNormal];
-        
-        // Retornar botão para posição original
-        CGRect frame = sender.frame;
-        frame.origin.y = 60;
-        sender.frame = frame;
+        [self minimizeWindow];
     }
 }
 
-// Esconder interface (minimizar)
-- (void)hideInterface {
-    self.hidden = YES;
+- (void)minimizeWindow {
+    if (_isMinimized) return;
     
-    // Aguardar alguns segundos e mostrar apenas um pequeno indicador
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        UIButton *showButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        showButton.frame = CGRectMake(5, 60, 30, 30);
-        showButton.backgroundColor = [UIColor colorWithRed:0 green:0 blue:0.8 alpha:0.7];
-        showButton.layer.cornerRadius = 15;
-        [showButton setTitle:@"VC" forState:UIControlStateNormal];
-        [showButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        [showButton addTarget:self action:@selector(showInterface) forControlEvents:UIControlEventTouchUpInside];
+    // Animação para minimizar
+    [UIView animateWithDuration:0.3 animations:^{
+        self.frame = _minimizedFrame;
+        self.statusLabel.frame = CGRectMake(0, 0, 40, 40);
+        self.statusLabel.text = @"VC";
         
-        // Adicionar à janela de toque
-        UIWindow *touchWindow = [[UIWindow alloc] initWithFrame:CGRectMake(5, 60, 30, 30)];
-        touchWindow.windowLevel = UIWindowLevelNormal + 50;
-        touchWindow.backgroundColor = [UIColor clearColor];
-        [touchWindow addSubview:showButton];
-        [touchWindow makeKeyAndVisible];
-        self.touchWindow = touchWindow;
-    });
+        // Esconder os outros elementos
+        self.serverTextField.alpha = 0;
+        self.connectButton.alpha = 0;
+    } completion:^(BOOL finished) {
+        _isMinimized = YES;
+    }];
 }
 
-// Mostrar interface completa novamente
-- (void)showInterface {
-    self.hidden = NO;
-    [self makeKeyAndVisible];
+- (void)maximizeWindow {
+    if (!_isMinimized) return;
     
-    // Remover o botão de toque
-    if (self.touchWindow) {
-        self.touchWindow.hidden = YES;
-        self.touchWindow = nil;
-    }
+    // Animação para maximizar
+    [UIView animateWithDuration:0.3 animations:^{
+        self.frame = _normalFrame;
+        self.statusLabel.frame = CGRectMake(10, 10, 180, 30);
+        self.statusLabel.text = @"VirtualCam";
+        
+        // Mostrar os outros elementos
+        self.serverTextField.alpha = 1;
+        self.connectButton.alpha = 1;
+    } completion:^(BOOL finished) {
+        _isMinimized = NO;
+    }];
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
@@ -181,6 +159,13 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
     
     // Resetar a translação
     [gesture setTranslation:CGPointZero inView:self];
+    
+    // Atualizar frames
+    if (_isMinimized) {
+        _minimizedFrame = self.frame;
+    } else {
+        _normalFrame = self.frame;
+    }
 }
 
 - (void)show {
@@ -199,29 +184,8 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
 
 - (void)updateStatus:(NSString *)status {
     dispatch_async(dispatch_get_main_queue(), ^{
-        self.statusLabel.text = status;
-    });
-}
-
-- (void)updatePreviewImage:(UIImage *)image {
-    // Só atualizar se o preview estiver visível
-    if (self.previewImageView.hidden) {
-        return;
-    }
-    
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.previewImageView.image = image;
-        
-        // Atualizar contador de FPS
-        self.frameCount++;
-        NSTimeInterval elapsed = -[self.lastFPSUpdate timeIntervalSinceNow];
-        
-        if (elapsed >= 1.0) { // Atualizar FPS a cada segundo
-            CGFloat fps = self.frameCount / elapsed;
-            self.fpsLabel.text = [NSString stringWithFormat:@"FPS: %.1f", fps];
-            
-            self.frameCount = 0;
-            self.lastFPSUpdate = [NSDate date];
+        if (!_isMinimized) {
+            self.statusLabel.text = status;
         }
     });
 }
@@ -229,8 +193,11 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
 - (void)connectButtonTapped {
     @try {
         if (!self.isConnected) {
-            writeLog(@"[UI] Botão conectar pressionado");
+            writeLog(@"[UI] Botão ativar pressionado");
             [self updateStatus:@"VirtualCam\nConectando..."];
+            
+            // Desabilitar o botão temporariamente para evitar cliques múltiplos
+            self.connectButton.enabled = NO;
             
             NSString *serverUrl = self.serverTextField.text;
             if (![serverUrl hasPrefix:@"http://"]) {
@@ -241,55 +208,52 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
             NSURL *url = [NSURL URLWithString:serverUrl];
             if (!url) {
                 [self updateStatus:@"VirtualCam\nURL inválida"];
+                self.connectButton.enabled = YES;
                 return;
             }
             
-            // IMPORTANTE: Ativar o VirtualCameraController PRIMEIRO
-            // Isso garante que qualquer app que use a câmera receba o feed substituído
-            [[VirtualCameraController sharedInstance] startCapturing];
+            // Armazenar nos defaults
+            writeLog(@"[UI] Salvando URL do servidor: %@", serverUrl);
+            [[NSUserDefaults standardUserDefaults] setObject:serverUrl forKey:@"VCamMJPEG_ServerURL"];
+            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamMJPEG_Enabled"];
+            [[NSUserDefaults standardUserDefaults] synchronize];
             
-            // Configurar MJPEGReader
-            MJPEGReader *reader = [MJPEGReader sharedInstance];
+            // Enviar notificação através do Darwin Notification Center
+            writeLog(@"[UI] Enviando notificação de ativação...");
+            notify_post("com.vcam.mjpeg.activate");
             
-            // Configurar callback para UI - apenas se o preview estiver ativo
-            if (!self.previewImageView.hidden) {
-                __weak typeof(self) weakSelf = self;
-                reader.frameCallback = ^(UIImage *image) {
-                    [weakSelf updatePreviewImage:image];
-                };
-            } else {
-                // Desativar callback se preview estiver desativado
-                reader.frameCallback = nil;
-            }
+            self.isConnected = YES;
+            [self.connectButton setTitle:@"Desativar Câmera Virtual" forState:UIControlStateNormal];
+            [self.connectButton setBackgroundColor:[UIColor colorWithRed:0.2 green:0.7 blue:0.2 alpha:0.9]]; // Verde para ativado
+            [self updateStatus:@"VirtualCam\nAtivo"];
             
-            // Iniciar streaming de forma protegida
-            @try {
-                [reader startStreamingFromURL:url];
-                self.isConnected = YES;
-                [self.connectButton setTitle:@"Desconectar" forState:UIControlStateNormal];
-                [self updateStatus:@"VirtualCam\nConectado"];
-            } @catch (NSException *e) {
-                writeLog(@"[UI] Erro ao iniciar streaming: %@", e);
-                [self updateStatus:@"VirtualCam\nErro ao conectar"];
-            }
+            // Enviar notificação de status
+            notify_post("com.vcam.mjpeg.activation_status");
+            
+            // Reabilitar o botão
+            self.connectButton.enabled = YES;
         } else {
-            // Desconectar de forma protegida
-            @try {
-                [[MJPEGReader sharedInstance] stopStreaming];
-                self.isConnected = NO;
-                [self.connectButton setTitle:@"Conectar" forState:UIControlStateNormal];
-                [self updateStatus:@"VirtualCam\nDesconectado"];
-                self.previewImageView.image = nil;
-                self.fpsLabel.text = @"FPS: --";
-                
-                // Parar o VirtualCameraController também
-                [[VirtualCameraController sharedInstance] stopCapturing];
-            } @catch (NSException *e) {
-                writeLog(@"[UI] Erro ao parar streaming: %@", e);
-            }
+            // Desativar a câmera virtual
+            writeLog(@"[UI] Enviando notificação para desativar câmera virtual");
+            
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamMJPEG_Enabled"];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            
+            // Enviar notificação
+            notify_post("com.vcam.mjpeg.deactivate");
+            
+            self.isConnected = NO;
+            [self.connectButton setTitle:@"Ativar Câmera Virtual" forState:UIControlStateNormal];
+            [self.connectButton setBackgroundColor:[UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9]]; // Vermelho para desativado
+            [self updateStatus:@"VirtualCam\nInativo"];
+            
+            // Enviar notificação de status
+            notify_post("com.vcam.mjpeg.activation_status");
         }
     } @catch (NSException *exception) {
         writeLog(@"[UI] Erro geral em connectButtonTapped: %@", exception);
+        [self updateStatus:@"VirtualCam\nErro"];
+        self.connectButton.enabled = YES;
     }
 }
 

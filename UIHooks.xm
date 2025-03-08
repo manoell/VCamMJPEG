@@ -3,6 +3,27 @@
 // Grupo para hooks relacionados a UI e imagens
 %group UIHooks
 
+// Função auxiliar para determinar a orientação correta com base no videoOrientation
+UIImageOrientation determineCorrectOrientation(int videoOrientation) {
+    // Log para debug
+    writeLog(@"[ORIENTATION] Convertendo videoOrientation %d para UIImageOrientation", videoOrientation);
+    
+    switch (videoOrientation) {
+        case 1: // Portrait
+            return UIImageOrientationUp;
+        case 2: // Portrait upside down
+            return UIImageOrientationDown;
+        case 3: // Landscape right
+            // CORREÇÃO: Diferente do tweak anterior, usamos Right para Landscape Right
+            return UIImageOrientationRight;
+        case 4: // Landscape left
+            // CORREÇÃO: Diferente do tweak anterior, usamos Left para Landscape Left
+            return UIImageOrientationLeft;
+        default:
+            return UIImageOrientationUp;
+    }
+}
+
 // Hook para UIImage para interceptar a geração de miniaturas
 %hook UIImage
 
@@ -25,42 +46,22 @@
                 CGImageRef mjpegImage = [context createCGImage:ciImage fromRect:ciImage.extent];
                 
                 if (mjpegImage) {
-                    // SOLUÇÃO CRÍTICA: Forçar orientação correta com base em g_videoOrientation
+                    // CORREÇÃO: Determinar a orientação correta com base em g_videoOrientation
                     UIImageOrientation forceOrientation;
                     
                     if (g_isVideoOrientationSet) {
-                        switch (g_videoOrientation) {
-                            case 1: // Portrait
-                                forceOrientation = UIImageOrientationUp;
-                                break;
-                            case 2: // Portrait upside down
-                                forceOrientation = UIImageOrientationDown;
-                                break;
-                            case 3: // Landscape right - este é o problema
-                                forceOrientation = UIImageOrientationLeft;  // IMPORTANTE: Use LEFT para Landscape RIGHT
-                                break;
-                            case 4: // Landscape left
-                                forceOrientation = UIImageOrientationRight;  // IMPORTANTE: Use RIGHT para Landscape LEFT
-                                break;
-                            default:
-                                forceOrientation = orientation;
-                                break;
-                        }
+                        forceOrientation = determineCorrectOrientation(g_videoOrientation);
                         
                         writeLog(@"[HOOK] FORÇANDO orientação %d para %d com base em videoOrientation %d",
                                (int)orientation, (int)forceOrientation, g_videoOrientation);
-                        
-                        // Usar a imagem MJPEG em vez da original com a orientação forçada
-                        UIImage *result = %orig(mjpegImage, scale, forceOrientation);
-                        CGImageRelease(mjpegImage);
-                        return result;
                     } else {
-                        // Se não temos orientação definida, usar a orientação original
-                        writeLog(@"[HOOK] Substituindo miniatura com imagem MJPEG (orientação original: %d)", (int)orientation);
-                        UIImage *result = %orig(mjpegImage, scale, orientation);
-                        CGImageRelease(mjpegImage);
-                        return result;
+                        forceOrientation = orientation;
                     }
+                    
+                    // Usar a imagem MJPEG em vez da original com a orientação forçada
+                    UIImage *result = %orig(mjpegImage, scale, forceOrientation);
+                    CGImageRelease(mjpegImage);
+                    return result;
                 }
             }
         }
@@ -97,23 +98,10 @@
                         CGImageRef mjpegImage = [context createCGImage:ciImage fromRect:ciImage.extent];
                         
                         if (mjpegImage) {
-                            // Determinar a orientação correta baseada no estado da câmera
+                            // CORREÇÃO: Determinar a orientação correta
                             UIImageOrientation orientation = UIImageOrientationUp;
                             if (g_isVideoOrientationSet) {
-                                switch (g_videoOrientation) {
-                                    case 1: // Portrait
-                                        orientation = UIImageOrientationUp;
-                                        break;
-                                    case 2: // Portrait upside down
-                                        orientation = UIImageOrientationDown;
-                                        break;
-                                    case 3: // Landscape right
-                                        orientation = UIImageOrientationLeft; // Corrigido
-                                        break;
-                                    case 4: // Landscape left
-                                        orientation = UIImageOrientationRight; // Corrigido
-                                        break;
-                                }
+                                orientation = determineCorrectOrientation(g_videoOrientation);
                             }
                             
                             // Criar UIImage a partir da nossa imagem com orientação correta
@@ -180,31 +168,13 @@
                     CGImageRef mjpegImage = [context createCGImage:ciImage fromRect:ciImage.extent];
                     
                     if (mjpegImage) {
-                        // CORREÇÃO: Mapear corretamente a orientação com base na orientação do dispositivo
+                        // CORREÇÃO: Mapear corretamente a orientação
                         UIImageOrientation orientation = UIImageOrientationUp;
                         
                         // Verificar se temos uma orientação definida
                         if (g_isVideoOrientationSet) {
-                            // Mapear corretamente orientação do vídeo para UIImageOrientation
-                            switch (g_videoOrientation) {
-                                case 1: // Portrait
-                                    orientation = UIImageOrientationUp;
-                                    break;
-                                case 2: // Portrait upside down
-                                    orientation = UIImageOrientationDown;
-                                    break;
-                                case 3: // Landscape right
-                                    // CORREÇÃO: Usar Left em vez de Right
-                                    orientation = UIImageOrientationLeft;
-                                    break;
-                                case 4: // Landscape left
-                                    // CORREÇÃO: Usar Right em vez de Left
-                                    orientation = UIImageOrientationRight;
-                                    break;
-                                default:
-                                    orientation = UIImageOrientationUp;
-                                    break;
-                            }
+                            // CORREÇÃO: Usar nossa função auxiliar para determinar a orientação correta
+                            orientation = determineCorrectOrientation(g_videoOrientation);
                         } else if (image) {
                             // Se não temos orientação definida mas temos imagem original, usar sua orientação
                             orientation = image.imageOrientation;
