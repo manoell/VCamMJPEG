@@ -2,6 +2,9 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 
+// Variável global para status da conexão
+extern BOOL gGlobalReaderConnected;
+
 // Leitor de MJPEG
 @interface MJPEGReader : NSObject <NSURLSessionDataDelegate>
 

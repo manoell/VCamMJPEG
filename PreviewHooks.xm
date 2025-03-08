@@ -9,6 +9,12 @@
 - (void)addSublayer:(CALayer *)layer {
     %orig;
     
+    // Verificar se o tweak está ativado
+    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
+    if (!isEnabled) {
+        return;
+    }
+    
     // Verificar se já injetamos nossa camada
     if (![self.sublayers containsObject:g_customDisplayLayer]) {
         // Criar nossa própria camada de exibição se ainda não existe
@@ -41,6 +47,14 @@
 // Adicionar método step: para atualização periódica
 %new
 - (void)step:(CADisplayLink *)link {
+    // Verificar se o tweak está ativado
+    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
+    if (!isEnabled) {
+        [g_maskLayer setOpacity:0.0];
+        [g_customDisplayLayer setOpacity:0.0];
+        return;
+    }
+    
     // Verificar se o VirtualCameraController está ativo
     if (![[VirtualCameraController sharedInstance] isActive]) {
         [g_maskLayer setOpacity:0.0];
@@ -112,6 +126,13 @@
         return;
     }
     
+    // Verificar se o tweak está ativado
+    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
+    if (!isEnabled) {
+        %orig;
+        return;
+    }
+    
     // Verificar se o VirtualCameraController está ativo
     if (![[VirtualCameraController sharedInstance] isActive]) {
         %orig;
@@ -166,5 +187,8 @@
 
 // Constructor específico deste arquivo
 %ctor {
-    %init(PreviewHooks);
+    // Inicializar os hooks só depois que tudo estiver carregado
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        %init(PreviewHooks);
+    });
 }

@@ -112,11 +112,18 @@ static BOOL gCaptureSystemActive = NO;
     MJPEGReader *reader = [MJPEGReader sharedInstance];
     if (!reader.isConnected) {
         writeLog(@"[CAMERA] MJPEGReader não está conectado, verificando URL atual");
-        if (reader.currentURL) {
-            writeLog(@"[CAMERA] Tentando reconectar com URL anterior: %@", reader.currentURL);
+        
+        // Obter a URL do servidor dos defaults
+        NSString *serverURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamMJPEG_ServerURL"];
+        
+        if (serverURL) {
+            writeLog(@"[CAMERA] Conectando com URL dos defaults: %@", serverURL);
+            [reader startStreamingFromURL:[NSURL URLWithString:serverURL]];
+        } else if (reader.currentURL) {
+            writeLog(@"[CAMERA] Reconectando com URL anterior: %@", reader.currentURL);
             [reader startStreamingFromURL:reader.currentURL];
         } else {
-            writeLog(@"[CAMERA] Nenhuma URL anterior disponível, aguardando configuração manual");
+            writeLog(@"[CAMERA] Nenhuma URL disponível, aguardando configuração manual");
         }
     }
     

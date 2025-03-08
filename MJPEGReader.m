@@ -3,8 +3,9 @@
 #import "logger.h"
 #import "VirtualCameraController.h"
 
-// Indica se alguma instância já está conectada
-static BOOL gGlobalReaderConnected = NO;
+// Indica se alguma instância já está conectada - GLOBAL
+BOOL gGlobalReaderConnected = NO;
+
 // URL do servidor atual
 static NSString *gCurrentServerURL = nil;
 
@@ -231,15 +232,20 @@ static NSString *gCurrentServerURL = nil;
         }
     }
     
-    // Não fechar a conexão global aqui, apenas ajustar o backoff
+    // Verificar se ainda devemos tentar reconectar
+    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
+    
     // Tentar reconectar automaticamente após o tempo de backoff
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_connectionBackoff * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (self.currentURL && !self.isConnected && gGlobalReaderConnected) {
+    if (isEnabled && self.currentURL) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_connectionBackoff * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             writeLog(@"[MJPEG] Tentando reconectar automaticamente a %@ após backoff de %.1f segundos",
                     self.currentURL, _connectionBackoff);
             [self startStreamingFromURL:self.currentURL];
-        }
-    });
+        });
+    } else {
+        writeLog(@"[MJPEG] Tweak desativado ou sem URL, não tentando reconexão");
+        gGlobalReaderConnected = NO;
+    }
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
@@ -441,7 +447,7 @@ static NSString *gCurrentServerURL = nil;
                 self.isConnected = NO;
                 self.isReconnecting = NO;
                 self.dataTask = nil;
-                // Não alteramos gGlobalReaderConnected aqui para permitir que a janela de UI mostre que a câmera está desativada
+                // Não alteramos gGlobalReaderConnected aqui para permitir que a janela de UI mostre o estado correto
             }
         }
     } else {
@@ -452,8 +458,11 @@ static NSString *gCurrentServerURL = nil;
             self.dataTask = nil;
         }
         
+        // Verificar se o tweak ainda está ativo para tentar reconectar
+        BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
+        
         // Se a tarefa terminou normalmente e o tweak ainda está ativo, tente reconectar
-        if (gGlobalReaderConnected && self.currentURL) {
+        if (isEnabled && self.currentURL) {
             writeLog(@"[MJPEG] Reconectando após finalização normal...");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 [self startStreamingFromURL:self.currentURL];

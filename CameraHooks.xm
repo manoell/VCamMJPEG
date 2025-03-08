@@ -30,20 +30,28 @@ static void updateCurrentCameraResolution() {
     @try {
         VirtualCameraController *controller = [VirtualCameraController sharedInstance];
         
-        writeLog(@"[HOOK] Ativando VirtualCameraController após AVCaptureSession.startRunning");
-        [controller startCapturing];
-        
-        // Registrar status atual
-        writeLog(@"[HOOK] VirtualCameraController ativo: %d", controller.isActive);
-        
-        // Ativar conexão MJPEG se necessário
-        MJPEGReader *reader = [MJPEGReader sharedInstance];
-        if (!reader.isConnected) {
-            writeLog(@"[HOOK] Iniciando conexão MJPEG após AVCaptureSession.startRunning");
-            [reader startStreamingFromURL:[NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"]];
+        // Verificar se a câmera virtual está ativa usando a variável global
+        if (gGlobalReaderConnected) {
+            writeLog(@"[HOOK] Ativando VirtualCameraController após AVCaptureSession.startRunning");
+            [controller startCapturing];
+            
+            // Registrar status atual
+            writeLog(@"[HOOK] VirtualCameraController ativo: %d", controller.isActive);
+            
+            // Ativar conexão MJPEG se necessário
+            MJPEGReader *reader = [MJPEGReader sharedInstance];
+            if (!reader.isConnected) {
+                NSString *serverURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamMJPEG_ServerURL"];
+                if (serverURL) {
+                    writeLog(@"[HOOK] Iniciando conexão MJPEG após AVCaptureSession.startRunning");
+                    [reader startStreamingFromURL:[NSURL URLWithString:serverURL]];
+                }
+            }
+            
+            writeLog(@"[HOOK] MJPEGReader conectado: %d", reader.isConnected);
+        } else {
+            writeLog(@"[HOOK] VirtualCameraController não foi ativado (Camera virtual desativada)");
         }
-        
-        writeLog(@"[HOOK] MJPEGReader conectado: %d", reader.isConnected);
     } @catch (NSException *exception) {
         writeLog(@"[HOOK] Erro após startRunning: %@", exception);
     }
@@ -134,16 +142,7 @@ static void updateCurrentCameraResolution() {
     writeLog(@"[HOOK] AVCaptureVideoDataOutput setSampleBufferDelegate: %@",
              NSStringFromClass([sampleBufferDelegate class]));
     
-    // Criar um proxy para o delegado original
-    if (sampleBufferDelegate && [[VirtualCameraController sharedInstance] isActive]) {
-        // Usar objc_setAssociatedObject para associar o delegado original
-        objc_setAssociatedObject(sampleBufferDelegate, "originalDelegate", sampleBufferDelegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        
-        // Chamar o método original com o delegado interceptado
-        %orig;
-    } else {
-        %orig;
-    }
+    %orig;
 }
 
 %end
@@ -169,8 +168,8 @@ static void updateCurrentCameraResolution() {
         return %orig;
     }
     
-    // Verificar se a substituição da câmera está ativa
-    if (![[VirtualCameraController sharedInstance] isActive]) {
+    // Verificar se a substituição da câmera está ativa usando a variável global
+    if (!gGlobalReaderConnected || ![[VirtualCameraController sharedInstance] isActive]) {
         return %orig;
     }
     

@@ -12,7 +12,6 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
     BOOL _isMinimized;
     CGRect _normalFrame;
     CGRect _minimizedFrame;
-    int _notifyToken;
 }
 
 + (instancetype)sharedInstance {
@@ -61,7 +60,7 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
         self.serverTextField.leftViewMode = UITextFieldViewModeAlways;
         [self addSubview:self.serverTextField];
         
-        // Connect/Toggle button
+        // Connect/Toggle button - INICIALMENTE DESATIVADO (VERMELHO)
         self.connectButton = [UIButton buttonWithType:UIButtonTypeSystem];
         self.connectButton.frame = CGRectMake(10, 85, 180, 25);
         [self.connectButton setTitle:@"Ativar Câmera Virtual" forState:UIControlStateNormal];
@@ -80,33 +79,17 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
         _doubleTapGesture.numberOfTapsRequired = 2;
         [self addGestureRecognizer:_doubleTapGesture];
         
-        // Registrar para receber notificações do Darwin
-        notify_register_dispatch("com.vcam.mjpeg.activation_status", &_notifyToken, dispatch_get_main_queue(), ^(int token) {
-            writeLog(@"[UI] Recebida notificação de status de ativação");
-            BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self.isConnected = isEnabled;
-                if (isEnabled) {
-                    [self.connectButton setTitle:@"Desativar Câmera Virtual" forState:UIControlStateNormal];
-                    [self.connectButton setBackgroundColor:[UIColor colorWithRed:0.2 green:0.7 blue:0.2 alpha:0.9]];
-                    [self updateStatus:@"VirtualCam\nAtivo"];
-                } else {
-                    [self.connectButton setTitle:@"Ativar Câmera Virtual" forState:UIControlStateNormal];
-                    [self.connectButton setBackgroundColor:[UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9]];
-                    [self updateStatus:@"VirtualCam\nInativo"];
-                }
-            });
-        });
+        // Inicializar estado - SEMPRE DESATIVADO POR PADRÃO
+        self.isConnected = NO;
+        [self updateStatus:@"VirtualCam\nInativo"];
+        
+        // Forçar desativação nos NSUserDefaults no início
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamMJPEG_Enabled"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
         
         writeLog(@"[UI] MJPEGPreviewWindow inicializado");
     }
     return self;
-}
-
-- (void)dealloc {
-    if (_notifyToken) {
-        notify_cancel(_notifyToken);
-    }
 }
 
 - (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
@@ -218,37 +201,37 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
             [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamMJPEG_Enabled"];
             [[NSUserDefaults standardUserDefaults] synchronize];
             
-            // Enviar notificação através do Darwin Notification Center
-            writeLog(@"[UI] Enviando notificação de ativação...");
-            notify_post("com.vcam.mjpeg.activate");
+            // Ativar diretamente no MJPEGReader
+            MJPEGReader *reader = [MJPEGReader sharedInstance];
+            [reader startStreamingFromURL:url];
             
+            // Ativar o VirtualCameraController
+            [[VirtualCameraController sharedInstance] startCapturing];
+            
+            // Atualizar UI imediatamente
             self.isConnected = YES;
             [self.connectButton setTitle:@"Desativar Câmera Virtual" forState:UIControlStateNormal];
             [self.connectButton setBackgroundColor:[UIColor colorWithRed:0.2 green:0.7 blue:0.2 alpha:0.9]]; // Verde para ativado
             [self updateStatus:@"VirtualCam\nAtivo"];
             
-            // Enviar notificação de status
-            notify_post("com.vcam.mjpeg.activation_status");
-            
             // Reabilitar o botão
             self.connectButton.enabled = YES;
         } else {
             // Desativar a câmera virtual
-            writeLog(@"[UI] Enviando notificação para desativar câmera virtual");
+            writeLog(@"[UI] Botão desativar pressionado");
             
             [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamMJPEG_Enabled"];
             [[NSUserDefaults standardUserDefaults] synchronize];
             
-            // Enviar notificação
-            notify_post("com.vcam.mjpeg.deactivate");
+            // Desativar diretamente
+            [[MJPEGReader sharedInstance] stopStreaming];
+            [[VirtualCameraController sharedInstance] stopCapturing];
             
+            // Atualizar UI imediatamente
             self.isConnected = NO;
             [self.connectButton setTitle:@"Ativar Câmera Virtual" forState:UIControlStateNormal];
             [self.connectButton setBackgroundColor:[UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9]]; // Vermelho para desativado
             [self updateStatus:@"VirtualCam\nInativo"];
-            
-            // Enviar notificação de status
-            notify_post("com.vcam.mjpeg.activation_status");
         }
     } @catch (NSException *exception) {
         writeLog(@"[UI] Erro geral em connectButtonTapped: %@", exception);
