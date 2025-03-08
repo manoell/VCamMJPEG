@@ -26,35 +26,28 @@ static void updateCurrentCameraResolution() {
     // Registrar delegados conhecidos
     logDelegates();
     
-    // Verificar se o controlador deve estar ativo baseado no estado da interface
-    BOOL shouldBeActive = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    
-    if (shouldBeActive) {
-        @try {
-            VirtualCameraController *controller = [VirtualCameraController sharedInstance];
-            
-            writeLog(@"[HOOK] Ativando VirtualCameraController após AVCaptureSession.startRunning");
-            [controller startCapturing];
-            
-            // Registrar status atual
-            writeLog(@"[HOOK] VirtualCameraController ativo: %d", controller.isActive);
-            
-            // Ativar conexão MJPEG se necessário
-            NSString *savedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamMJPEG_ServerURL"];
-            if (savedURL && ![[MJPEGReader sharedInstance] isConnected]) {
-                NSURL *url = [NSURL URLWithString:savedURL];
-                if (url) {
-                    writeLog(@"[HOOK] Iniciando conexão MJPEG após AVCaptureSession.startRunning");
-                    [[MJPEGReader sharedInstance] startStreamingFromURL:url];
-                }
+    @try {
+        VirtualCameraController *controller = [VirtualCameraController sharedInstance];
+        
+        writeLog(@"[HOOK] Ativando VirtualCameraController após AVCaptureSession.startRunning");
+        [controller startCapturing];
+        
+        // Registrar status atual
+        writeLog(@"[HOOK] VirtualCameraController ativo: %d", controller.isActive);
+        
+        // Ativar conexão MJPEG se necessário
+        NSString *savedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamMJPEG_ServerURL"];
+        if (savedURL && ![[MJPEGReader sharedInstance] isConnected]) {
+            NSURL *url = [NSURL URLWithString:savedURL];
+            if (url) {
+                writeLog(@"[HOOK] Iniciando conexão MJPEG após AVCaptureSession.startRunning");
+                [[MJPEGReader sharedInstance] startStreamingFromURL:url];
             }
-            
-            writeLog(@"[HOOK] MJPEGReader conectado: %d", [[MJPEGReader sharedInstance] isConnected]);
-        } @catch (NSException *exception) {
-            writeLog(@"[HOOK] Erro após startRunning: %@", exception);
         }
-    } else {
-        writeLog(@"[HOOK] VirtualCameraController não será iniciado - desativado via interface");
+        
+        writeLog(@"[HOOK] MJPEGReader conectado: %d", [[MJPEGReader sharedInstance] isConnected]);
+    } @catch (NSException *exception) {
+        writeLog(@"[HOOK] Erro após startRunning: %@", exception);
     }
 }
 
@@ -173,29 +166,60 @@ static void updateCurrentCameraResolution() {
 
 // Para a captura de frames de vídeo
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    // Verificar se somos um delegate de amostra de buffer
-    if (![self respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
-        return %orig;
-    }
-    
-    // Verificar se a substituição da câmera está ativa
-    if (![[VirtualCameraController sharedInstance] isActive]) {
-        return %orig;
-    }
-    
-    // Obter informações de orientação do vídeo
-    g_videoOrientation = (int)connection.videoOrientation;
-    
-    // Obter buffer de substituição
-    CMSampleBufferRef mjpegBuffer = [GetFrame getCurrentFrame:sampleBuffer replace:YES];
-    
-    if (mjpegBuffer && CMSampleBufferIsValid(mjpegBuffer)) {
-        // Chamar o método original com o buffer MJPEG
-        %orig(output, mjpegBuffer, connection);
+    @try {
+        // Verificar se somos um delegate de amostra de buffer
+        if (![self respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+            %orig;
+            return;
+        }
         
-        // Não liberar mjpegBuffer pois o método original vai usá-lo
-    } else {
-        // Se não conseguimos substituir, usar o original
+        // Verificar se a substituição da câmera está ativa
+        BOOL isActive = NO;
+        @try {
+            isActive = [[VirtualCameraController sharedInstance] isActive];
+        } @catch (NSException *e) {
+            writeLog(@"[HOOK] Exceção ao verificar estado ativo: %@", e);
+        }
+        
+        if (!isActive) {
+            %orig;
+            return;
+        }
+        
+        // Obter informações de orientação do vídeo
+        g_videoOrientation = (int)connection.videoOrientation;
+        
+        // Obter buffer de substituição com proteção de erro
+        CMSampleBufferRef mjpegBuffer = NULL;
+        @try {
+            mjpegBuffer = [GetFrame getCurrentFrame:sampleBuffer replace:YES];
+        } @catch (NSException *e) {
+            writeLog(@"[HOOK] Exceção ao obter frame MJPEG: %@", e);
+            mjpegBuffer = NULL;
+        }
+        
+        // Verificação adicional de segurança
+        BOOL bufferValid = NO;
+        if (mjpegBuffer != NULL) {
+            @try {
+                bufferValid = CMSampleBufferIsValid(mjpegBuffer);
+            } @catch (NSException *e) {
+                writeLog(@"[HOOK] Exceção ao validar buffer MJPEG: %@", e);
+                bufferValid = NO;
+            }
+        }
+        
+        if (mjpegBuffer != NULL && bufferValid) {
+            // Chamar o método original com o buffer MJPEG
+            %orig(output, mjpegBuffer, connection);
+            
+            // Não liberar mjpegBuffer pois o método original vai usá-lo
+        } else {
+            // Se não conseguimos substituir, usar o original
+            %orig;
+        }
+    } @catch (NSException *e) {
+        writeLog(@"[HOOK] Exceção geral em captureOutput: %@", e);
         %orig;
     }
 }

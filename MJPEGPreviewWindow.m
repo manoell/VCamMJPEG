@@ -414,8 +414,15 @@ static CGFloat const kCornerRadius = 22.0;
             self.currentServerURL = nil;
             [self updateConnectionState:ConnectionStateDisconnected];
             
-            // Salvar estado global para todos os processos
+            // Salvar estado global para todos os processos - com suite name específico
+            NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.vcam.mjpeg.defaults"];
+            [defaults setBool:NO forKey:@"VCamMJPEG_Enabled"];
+            [defaults setObject:nil forKey:@"VCamMJPEG_ServerURL"];
+            [defaults synchronize];
+            
+            // Também salvar no padrão para compatibilidade
             [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamMJPEG_Enabled"];
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"VCamMJPEG_ServerURL"];
             [[NSUserDefaults standardUserDefaults] synchronize];
             
             return;
@@ -445,7 +452,13 @@ static CGFloat const kCornerRadius = 22.0;
             // Guardar URL atual para reconexões
             self.currentServerURL = url;
             
-            // Salvar URL nas configurações para todos os processos
+            // Salvar URL nas configurações para todos os processos - com suite name específico
+            NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.vcam.mjpeg.defaults"];
+            [defaults setObject:serverUrl forKey:@"VCamMJPEG_ServerURL"];
+            [defaults setBool:YES forKey:@"VCamMJPEG_Enabled"];
+            [defaults synchronize];
+            
+            // Também salvar no padrão para compatibilidade
             [[NSUserDefaults standardUserDefaults] setObject:serverUrl forKey:@"VCamMJPEG_ServerURL"];
             [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamMJPEG_Enabled"];
             [[NSUserDefaults standardUserDefaults] synchronize];
@@ -483,8 +496,15 @@ static CGFloat const kCornerRadius = 22.0;
                 self.currentServerURL = nil;
                 [self updateConnectionState:ConnectionStateDisconnected];
                 
-                // Salvar estado global para todos os processos
+                // Salvar estado global para todos os processos - com suite name específico
+                NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.vcam.mjpeg.defaults"];
+                [defaults setBool:NO forKey:@"VCamMJPEG_Enabled"];
+                [defaults removeObjectForKey:@"VCamMJPEG_ServerURL"];
+                [defaults synchronize];
+                
+                // Também salvar no padrão para compatibilidade
                 [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamMJPEG_Enabled"];
+                [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"VCamMJPEG_ServerURL"];
                 [[NSUserDefaults standardUserDefaults] synchronize];
             } @catch (NSException *e) {
                 writeLog(@"[UI] Erro ao parar streaming: %@", e);

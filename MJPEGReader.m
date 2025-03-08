@@ -83,14 +83,6 @@ static NSString *gCurrentServerURL = nil;
     [connectionLock lock];
     
     @try {
-        // Verificar se estamos desativados globalmente
-        BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-        if (!isEnabled) {
-            writeLog(@"[MJPEG] Tentativa de conexão enquanto desativado globalmente. Ignorando.");
-            [connectionLock unlock];
-            return;
-        }
-        
         // Adicionar log para debug
         writeLog(@"[MJPEG] Verificando conexão para URL: %@, gGlobalReaderConnected: %d",
                  url.absoluteString, gGlobalReaderConnected);
@@ -128,6 +120,7 @@ static NSString *gCurrentServerURL = nil;
         
         // Salvar URL nas configurações para todos os processos
         [[NSUserDefaults standardUserDefaults] setObject:url.absoluteString forKey:@"VCamMJPEG_ServerURL"];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamMJPEG_Enabled"];
         [[NSUserDefaults standardUserDefaults] synchronize];
         
         writeLog(@"[MJPEG] Iniciando streaming de: %@", url.absoluteString);

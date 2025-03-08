@@ -41,62 +41,90 @@
 // Adicionar método step: para atualização periódica
 %new
 - (void)step:(CADisplayLink *)link {
-    // Verificar se o VirtualCameraController está ativo
-    if (![[VirtualCameraController sharedInstance] isActive]) {
-        [g_maskLayer setOpacity:0.0];
-        [g_customDisplayLayer setOpacity:0.0];
-        return;
-    }
-    
-    // Atualizar visibilidade das camadas
-    [g_maskLayer setOpacity:1.0];
-    [g_customDisplayLayer setOpacity:1.0];
-    [g_customDisplayLayer setVideoGravity:self.videoGravity];
-    
-    // Aplicar transformação baseada na orientação do vídeo
-    if (g_isVideoOrientationSet) {
-        CATransform3D transform = CATransform3DIdentity;
-        
-        // Ajustar transformação baseada na orientação
-        switch (g_videoOrientation) {
-            case 1: // Portrait
-                transform = CATransform3DIdentity;
-                break;
-            case 2: // Portrait upside down
-                transform = CATransform3DMakeRotation(M_PI, 0, 0, 1.0);
-                break;
-            case 3: // Landscape right
-                transform = CATransform3DMakeRotation(M_PI_2, 0, 0, 1.0);
-                break;
-            case 4: // Landscape left
-                transform = CATransform3DMakeRotation(-M_PI_2, 0, 0, 1.0);
-                break;
-            default:
-                transform = [self transform];
-                break;
+    @try {
+        // Verificar se o VirtualCameraController está ativo
+        BOOL isActive = NO;
+        @try {
+            isActive = [[VirtualCameraController sharedInstance] isActive];
+        } @catch (NSException *e) {
+            writeLog(@"[HOOK] Exceção ao verificar estado ativo em step: %@", e);
         }
         
-        [g_customDisplayLayer setTransform:transform];
-    }
-    
-    // Verificar se a camada está pronta para mais dados
-    if ([g_customDisplayLayer isReadyForMoreMediaData]) {
-        // Obter o último frame MJPEG
-        CMSampleBufferRef buffer = [GetFrame getCurrentFrame:nil replace:YES];
+        if (!isActive) {
+            [g_maskLayer setOpacity:0.0];
+            [g_customDisplayLayer setOpacity:0.0];
+            return;
+        }
         
-        if (buffer && CMSampleBufferIsValid(buffer)) {
-            // Limpar buffer existente e adicionar novo
-            [g_customDisplayLayer flush];
-            [g_customDisplayLayer enqueueSampleBuffer:buffer];
+        // Atualizar visibilidade das camadas
+        [g_maskLayer setOpacity:1.0];
+        [g_customDisplayLayer setOpacity:1.0];
+        [g_customDisplayLayer setVideoGravity:self.videoGravity];
+        
+        // Aplicar transformação baseada na orientação do vídeo
+        if (g_isVideoOrientationSet) {
+            CATransform3D transform = CATransform3DIdentity;
             
-            static int frameCount = 0;
-            if (++frameCount % 300 == 0) {
-                writeLog(@"[HOOK] Frame #%d injetado na camada personalizada", frameCount);
+            // Ajustar transformação baseada na orientação
+            switch (g_videoOrientation) {
+                case 1: // Portrait
+                    transform = CATransform3DIdentity;
+                    break;
+                case 2: // Portrait upside down
+                    transform = CATransform3DMakeRotation(M_PI, 0, 0, 1.0);
+                    break;
+                case 3: // Landscape right
+                    transform = CATransform3DMakeRotation(M_PI_2, 0, 0, 1.0);
+                    break;
+                case 4: // Landscape left
+                    transform = CATransform3DMakeRotation(-M_PI_2, 0, 0, 1.0);
+                    break;
+                default:
+                    transform = [self transform];
+                    break;
             }
             
-            // Liberar o buffer após uso
-            CFRelease(buffer);
+            [g_customDisplayLayer setTransform:transform];
         }
+        
+        // Verificar se a camada está pronta para mais dados
+        if ([g_customDisplayLayer isReadyForMoreMediaData]) {
+            // Obter o último frame MJPEG
+            CMSampleBufferRef buffer = NULL;
+            @try {
+                buffer = [GetFrame getCurrentFrame:nil replace:YES];
+            } @catch (NSException *e) {
+                writeLog(@"[HOOK] Exceção ao obter frame em step: %@", e);
+                buffer = NULL;
+            }
+            
+            // Verificar se o buffer é válido
+            BOOL isValid = NO;
+            if (buffer) {
+                @try {
+                    isValid = CMSampleBufferIsValid(buffer);
+                } @catch (NSException *e) {
+                    writeLog(@"[HOOK] Exceção ao verificar validade do buffer em step: %@", e);
+                    isValid = NO;
+                }
+            }
+            
+            if (buffer && isValid) {
+                // Limpar buffer existente e adicionar novo
+                [g_customDisplayLayer flush];
+                [g_customDisplayLayer enqueueSampleBuffer:buffer];
+                
+                static int frameCount = 0;
+                if (++frameCount % 300 == 0) {
+                    writeLog(@"[HOOK] Frame #%d injetado na camada personalizada", frameCount);
+                }
+                
+                // Liberar o buffer após uso
+                CFRelease(buffer);
+            }
+        }
+    } @catch (NSException *e) {
+        writeLog(@"[HOOK] Exceção geral em step: %@", e);
     }
 }
 
