@@ -82,13 +82,14 @@ static NSString *gCurrentServerURL = nil;
 - (void)startStreamingFromURL:(NSURL *)url {
     @synchronized(self) {
         @try {
-            // Adicionar log para debug
-            writeLog(@"[MJPEG] Verificando conexão para URL: %@, gGlobalReaderConnected: %d",
-                     url.absoluteString, gGlobalReaderConnected);
+            // Log inicial do estado
+            writeLog(@"[MJPEG] startStreamingFromURL: url=%@, gGlobalReaderConnected=%d, self.isConnected=%d, self.dataTask=%@",
+                     url.absoluteString, gGlobalReaderConnected, self.isConnected, self.dataTask ? @"válido" : @"nulo");
             
-            // Verificar se é a mesma URL e já está conectado
-            if (gGlobalReaderConnected && [url.absoluteString isEqualToString:gCurrentServerURL] && self.isConnected) {
-                writeLog(@"[MJPEG] Já existe uma conexão ativa para %@, ignorando pedido", url.absoluteString);
+            // CORREÇÃO: Modificar verificação para permitir reconexão
+            if (gGlobalReaderConnected && [url.absoluteString isEqualToString:gCurrentServerURL] &&
+                self.isConnected && self.dataTask != nil) {
+                writeLog(@"[MJPEG] Já existe uma conexão ativa e válida para %@", url.absoluteString);
                 return;
             }
             
@@ -152,6 +153,10 @@ static NSString *gCurrentServerURL = nil;
             
             // Resetar backoff se a conexão for bem sucedida (será definido como bem sucedida no callback didReceiveResponse)
             _connectionBackoff = 1.0;
+            
+            // Log final do estado
+            writeLog(@"[MJPEG] Estado após iniciar streaming: gGlobalReaderConnected=%d, self.isConnected=%d",
+                     gGlobalReaderConnected, self.isConnected);
         } @catch (NSException *exception) {
             writeLog(@"[MJPEG] Erro ao iniciar streaming: %@", exception.reason);
             
@@ -170,8 +175,11 @@ static NSString *gCurrentServerURL = nil;
 - (void)stopStreaming {
     @synchronized(self) {
         @try {
+            writeLog(@"[MJPEG] Parando streaming (isConnected=%d, gGlobalReaderConnected=%d)",
+                     self.isConnected, gGlobalReaderConnected);
+            
             if (self.dataTask) {
-                writeLog(@"[MJPEG] Parando streaming");
+                writeLog(@"[MJPEG] Cancelando dataTask");
                 [self.dataTask cancel];
                 self.dataTask = nil;
                 self.isConnected = NO;
@@ -186,6 +194,9 @@ static NSString *gCurrentServerURL = nil;
             
             // Limpar o buffer
             [self.buffer setLength:0];
+            
+            writeLog(@"[MJPEG] Streaming parado (isConnected=%d, gGlobalReaderConnected=%d)",
+                     self.isConnected, gGlobalReaderConnected);
         } @catch (NSException *exception) {
             writeLog(@"[MJPEG] Erro ao parar streaming: %@", exception);
         }

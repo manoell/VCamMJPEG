@@ -15,5 +15,6 @@
 - (void)updateStatus:(NSString *)status;
 - (void)minimizeWindow;
 - (void)maximizeWindow;
+- (void)connectButtonTapped;  // Tornando este método público
 
 @end

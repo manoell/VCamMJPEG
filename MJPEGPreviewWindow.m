@@ -2,6 +2,7 @@
 #import "MJPEGReader.h"
 #import "logger.h"
 #import "VirtualCameraController.h"
+#import "SharedPreferences.h"
 #import <notify.h>
 
 // URL do servidor MJPEG padrão
@@ -176,7 +177,7 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
 - (void)connectButtonTapped {
     @try {
         if (!self.isConnected) {
-            writeLog(@"[UI] Botão ativar pressionado");
+            writeLog(@"[UI] Botão ativar pressionado - estado atual: isConnected=%d", self.isConnected);
             [self updateStatus:@"VirtualCam\nConectando..."];
             
             // Desabilitar o botão temporariamente para evitar cliques múltiplos
@@ -195,18 +196,19 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
                 return;
             }
             
-            // Armazenar nos defaults
+            // Armazenar nas preferências compartilhadas
             writeLog(@"[UI] Salvando URL do servidor: %@", serverUrl);
-            [[NSUserDefaults standardUserDefaults] setObject:serverUrl forKey:@"VCamMJPEG_ServerURL"];
-            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamMJPEG_Enabled"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
+            [SharedPreferences setServerURL:serverUrl];
+            [SharedPreferences setTweakEnabled:YES];
+            
+            // Ativar o VirtualCameraController
+            [[VirtualCameraController sharedInstance] startCapturing];
+            writeLog(@"[UI] VirtualCameraController.isActive após startCapturing: %d",
+                     [VirtualCameraController sharedInstance].isActive);
             
             // Ativar diretamente no MJPEGReader
             MJPEGReader *reader = [MJPEGReader sharedInstance];
             [reader startStreamingFromURL:url];
-            
-            // Ativar o VirtualCameraController
-            [[VirtualCameraController sharedInstance] startCapturing];
             
             // Atualizar UI imediatamente
             self.isConnected = YES;
@@ -220,8 +222,8 @@ static NSString *const kDefaultServerURL = @"http://192.168.0.178:8080/mjpeg";
             // Desativar a câmera virtual
             writeLog(@"[UI] Botão desativar pressionado");
             
-            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamMJPEG_Enabled"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
+            // Desativar nas preferências compartilhadas
+            [SharedPreferences setTweakEnabled:NO];
             
             // Desativar diretamente
             [[MJPEGReader sharedInstance] stopStreaming];

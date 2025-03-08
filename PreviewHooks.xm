@@ -47,8 +47,16 @@
 // Adicionar método step: para atualização periódica
 %new
 - (void)step:(CADisplayLink *)link {
+    static int stepCount = 0;
+    BOOL isEnabled = [SharedPreferences isTweakEnabled];
+    
+    // Log a cada 300 frames
+    if (++stepCount % 300 == 0) {
+        writeLog(@"[PREVIEW] step: chamado %d vezes, isEnabled=%d, controller.isActive=%d",
+                stepCount, isEnabled, [[VirtualCameraController sharedInstance] isActive]);
+    }
+    
     // Verificar se o tweak está ativado
-    BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
     if (!isEnabled) {
         [g_maskLayer setOpacity:0.0];
         [g_customDisplayLayer setOpacity:0.0];
@@ -105,11 +113,13 @@
             
             static int frameCount = 0;
             if (++frameCount % 300 == 0) {
-                writeLog(@"[HOOK] Frame #%d injetado na camada personalizada", frameCount);
+                writeLog(@"[PREVIEW] Frame #%d injetado na camada personalizada", frameCount);
             }
             
             // Liberar o buffer após uso
             CFRelease(buffer);
+        } else if (stepCount % 300 == 0) {
+            writeLog(@"[PREVIEW] Falha ao obter buffer válido para preview");
         }
     }
 }

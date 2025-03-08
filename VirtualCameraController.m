@@ -82,11 +82,23 @@ static BOOL gCaptureSystemActive = NO;
 }
 
 - (void)startCapturing {
-    // Verificar se estamos no SpringBoard - limitar funcionalidade
+    // Verificar se estamos no SpringBoard - CORREÇÃO: Permitir ativação no SpringBoard
     BOOL isSpringBoard = [[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"];
     
     if (isSpringBoard) {
-        writeLog(@"[CAMERA] Detectado SpringBoard - modo limitado de operação");
+        writeLog(@"[CAMERA] Detectado SpringBoard - atualizando estado global");
+        gCaptureSystemActive = YES;
+        self.isActive = YES;
+        writeLog(@"[CAMERA] Estado global atualizado: gCaptureSystemActive=%d, self.isActive=%d",
+                 gCaptureSystemActive, self.isActive);
+        
+        // CORREÇÃO: Verificar e garantir que gGlobalReaderConnected esteja sincronizado
+        // Isso resolve o problema de estado inconsistente entre processos
+        if (!gGlobalReaderConnected) {
+            gGlobalReaderConnected = YES;
+            writeLog(@"[CAMERA] Atualizando gGlobalReaderConnected para %d a partir do SpringBoard", gGlobalReaderConnected);
+        }
+        
         return;
     }
     
