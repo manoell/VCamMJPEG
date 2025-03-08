@@ -83,6 +83,14 @@ static NSString *gCurrentServerURL = nil;
     [connectionLock lock];
     
     @try {
+        // Verificar se estamos desativados globalmente
+        BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
+        if (!isEnabled) {
+            writeLog(@"[MJPEG] Tentativa de conexão enquanto desativado globalmente. Ignorando.");
+            [connectionLock unlock];
+            return;
+        }
+        
         // Adicionar log para debug
         writeLog(@"[MJPEG] Verificando conexão para URL: %@, gGlobalReaderConnected: %d",
                  url.absoluteString, gGlobalReaderConnected);
@@ -117,6 +125,10 @@ static NSString *gCurrentServerURL = nil;
         // Armazena a URL atual globalmente
         self.currentURL = url;
         gCurrentServerURL = url.absoluteString;
+        
+        // Salvar URL nas configurações para todos os processos
+        [[NSUserDefaults standardUserDefaults] setObject:url.absoluteString forKey:@"VCamMJPEG_ServerURL"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
         
         writeLog(@"[MJPEG] Iniciando streaming de: %@", url.absoluteString);
         
@@ -233,6 +245,18 @@ static NSString *gCurrentServerURL = nil;
         if ([httpResponse isKindOfClass:[NSHTTPURLResponse class]]) {
             writeLog(@"[MJPEG] Código de resposta HTTP: %ld", (long)httpResponse.statusCode);
             
+            if (httpResponse.statusCode == 200) {
+                // Temos uma conexão bem-sucedida - notificar
+                self.isConnected = YES;
+                self.isReconnecting = NO;
+                gGlobalReaderConnected = YES;
+                
+                // Notificar observadores da conexão bem-sucedida
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"MJPEGReaderConnectionEstablished"
+                                                                    object:self
+                                                                  userInfo:nil];
+            }
+            
             // Verificar tipo de conteúdo para confirmar stream MJPEG
             NSString *contentType = [httpResponse.allHeaderFields objectForKey:@"Content-Type"];
             if (contentType) {
@@ -240,9 +264,6 @@ static NSString *gCurrentServerURL = nil;
             }
         }
         
-        self.isConnected = YES;
-        self.isReconnecting = NO;
-        gGlobalReaderConnected = YES;
         [self.buffer setLength:0];
         
         // Reset após 5 segundos
@@ -387,6 +408,13 @@ static NSString *gCurrentServerURL = nil;
     if (error) {
         if (error.code != NSURLErrorCancelled) { // Ignore cancelamento intencional
             writeLog(@"[MJPEG] Erro no streaming: %@", error);
+            self.isConnected = NO;
+            
+            // Notificar observadores da desconexão
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"MJPEGReaderConnectionLost"
+                                                                object:self
+                                                              userInfo:@{@"error": error}];
+                                                              
             [self resetWithError:error];
         }
     } else {
@@ -394,6 +422,11 @@ static NSString *gCurrentServerURL = nil;
         self.isConnected = NO;
         self.isReconnecting = NO;
         gGlobalReaderConnected = NO;
+        
+        // Também notificar neste caso
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MJPEGReaderConnectionLost"
+                                                            object:self
+                                                          userInfo:nil];
     }
 }
 

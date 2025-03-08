@@ -26,26 +26,35 @@ static void updateCurrentCameraResolution() {
     // Registrar delegados conhecidos
     logDelegates();
     
-    // Depois ativar o controlador com segurança
-    @try {
-        VirtualCameraController *controller = [VirtualCameraController sharedInstance];
-        
-        writeLog(@"[HOOK] Ativando VirtualCameraController após AVCaptureSession.startRunning");
-        [controller startCapturing];
-        
-        // Registrar status atual
-        writeLog(@"[HOOK] VirtualCameraController ativo: %d", controller.isActive);
-        
-        // Ativar conexão MJPEG se necessário
-        MJPEGReader *reader = [MJPEGReader sharedInstance];
-        if (!reader.isConnected) {
-            writeLog(@"[HOOK] Iniciando conexão MJPEG após AVCaptureSession.startRunning");
-            [reader startStreamingFromURL:[NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"]];
+    // Verificar se o controlador deve estar ativo baseado no estado da interface
+    BOOL shouldBeActive = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
+    
+    if (shouldBeActive) {
+        @try {
+            VirtualCameraController *controller = [VirtualCameraController sharedInstance];
+            
+            writeLog(@"[HOOK] Ativando VirtualCameraController após AVCaptureSession.startRunning");
+            [controller startCapturing];
+            
+            // Registrar status atual
+            writeLog(@"[HOOK] VirtualCameraController ativo: %d", controller.isActive);
+            
+            // Ativar conexão MJPEG se necessário
+            NSString *savedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamMJPEG_ServerURL"];
+            if (savedURL && ![[MJPEGReader sharedInstance] isConnected]) {
+                NSURL *url = [NSURL URLWithString:savedURL];
+                if (url) {
+                    writeLog(@"[HOOK] Iniciando conexão MJPEG após AVCaptureSession.startRunning");
+                    [[MJPEGReader sharedInstance] startStreamingFromURL:url];
+                }
+            }
+            
+            writeLog(@"[HOOK] MJPEGReader conectado: %d", [[MJPEGReader sharedInstance] isConnected]);
+        } @catch (NSException *exception) {
+            writeLog(@"[HOOK] Erro após startRunning: %@", exception);
         }
-        
-        writeLog(@"[HOOK] MJPEGReader conectado: %d", reader.isConnected);
-    } @catch (NSException *exception) {
-        writeLog(@"[HOOK] Erro após startRunning: %@", exception);
+    } else {
+        writeLog(@"[HOOK] VirtualCameraController não será iniciado - desativado via interface");
     }
 }
 

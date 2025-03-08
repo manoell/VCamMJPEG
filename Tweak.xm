@@ -59,7 +59,7 @@ void detectCameraResolutions() {
         detectCameraResolutions();
         
         // Inicialização única dos componentes principais
-        VirtualCameraController *controller = [VirtualCameraController sharedInstance];
+        //VirtualCameraController *controller = [VirtualCameraController sharedInstance];
         
         // Verificar se estamos em um aplicativo que usa a câmera
         BOOL isCameraApp =
@@ -71,11 +71,9 @@ void detectCameraResolutions() {
              [processName isEqualToString:@"MobileSlideShow"]); // Adicionar app de fotos
             
         if (isCameraApp) {
-            writeLog(@"[INIT] Configurando hooks para app de câmera: %@", processName);
-            // Iniciar controller após um pequeno delay
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [controller startCapturing];
-            });
+            writeLog(@"[INIT] Detectado app de câmera: %@", processName);
+            // Apenas registrar hooks, NÃO iniciar capturas
+            // NÃO chamar [controller startCapturing] aqui em nenhuma circunstância
         }
         
         // Mostrar a janela de preview apenas no SpringBoard (já minimizada)

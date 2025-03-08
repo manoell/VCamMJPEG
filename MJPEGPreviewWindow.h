@@ -4,7 +4,8 @@
 typedef NS_ENUM(NSInteger, ConnectionState) {
     ConnectionStateDisconnected = 0,  // Desconectado (vermelho)
     ConnectionStateConnected = 1,     // Conectado (verde)
-    ConnectionStateError = 2          // Erro (laranja)
+    ConnectionStateError = 2,         // Erro (laranja)
+    ConnectionStateReconnecting = 3   // Reconectando (amarelo)
 };
 
 // Janela de preview estilo assistiveTouch
@@ -19,6 +20,8 @@ typedef NS_ENUM(NSInteger, ConnectionState) {
 @property (nonatomic, assign) ConnectionState connectionState;  // Estado da conexão
 @property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
 @property (nonatomic, strong) UITapGestureRecognizer *doubleTapGesture;
+@property (nonatomic, strong) NSTimer *reconnectTimer;     // Timer para reconexão automática
+@property (nonatomic, strong) NSURL *currentServerURL;     // URL atual do servidor MJPEG
 
 + (instancetype)sharedInstance;
 - (void)show;
@@ -26,5 +29,8 @@ typedef NS_ENUM(NSInteger, ConnectionState) {
 - (void)updateConnectionState:(ConnectionState)state;
 - (void)toggleExpanded;  // Alternar entre expandido/minimizado
 - (void)connectButtonTapped;  // Método para botão conectar/desconectar
+- (void)startReconnectionTimer;
+- (void)stopReconnectionTimer;
+- (void)tryReconnect;
 
 @end

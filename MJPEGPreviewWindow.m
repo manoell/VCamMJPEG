@@ -43,6 +43,8 @@ static CGFloat const kCornerRadius = 22.0;
         // Estado inicial
         _isExpanded = NO;
         _connectionState = ConnectionStateDisconnected;
+        _reconnectTimer = nil;
+        _currentServerURL = nil;
         
         // Inicializar visualizações
         [self setupMinimizedView];
@@ -55,6 +57,18 @@ static CGFloat const kCornerRadius = 22.0;
         self.expandedView.hidden = YES;
         self.minimizedView.hidden = NO;
         
+        // Registrar para receber notificações de conexão perdida
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                selector:@selector(handleConnectionLost:)
+                                                    name:@"MJPEGReaderConnectionLost"
+                                                  object:nil];
+        
+        // Registrar para receber notificações de conexão estabelecida
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                selector:@selector(handleConnectionEstablished:)
+                                                    name:@"MJPEGReaderConnectionEstablished"
+                                                  object:nil];
+                                                  
         writeLog(@"[UI] MJPEGPreviewWindow inicializado em modo minimizado");
     }
     return self;
@@ -224,6 +238,7 @@ static CGFloat const kCornerRadius = 22.0;
             statusText = @"VirtualCam Conectado";
             buttonColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.2 alpha:0.8]; // Vermelho
             buttonText = @"Desconectar";
+            [self stopReconnectionTimer]; // Parar timer se estiver reconectando
             break;
             
         case ConnectionStateError:
@@ -231,6 +246,17 @@ static CGFloat const kCornerRadius = 22.0;
             statusText = @"VirtualCam ERRO";
             buttonColor = [UIColor colorWithRed:0.2 green:0.6 blue:0.2 alpha:0.8]; // Verde
             buttonText = @"Tentar Novamente";
+            // Iniciar timer de reconexão automática se não for um erro de URL inválida
+            if (self.currentServerURL) {
+                [self startReconnectionTimer];
+            }
+            break;
+            
+        case ConnectionStateReconnecting:
+            backgroundColor = [UIColor colorWithRed:0.9 green:0.7 blue:0.0 alpha:0.9]; // Amarelo
+            statusText = @"VirtualCam Reconectando...";
+            buttonColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.2 alpha:0.8]; // Vermelho
+            buttonText = @"Cancelar";
             break;
             
         case ConnectionStateDisconnected:
@@ -239,6 +265,7 @@ static CGFloat const kCornerRadius = 22.0;
             statusText = @"VirtualCam Desconectado";
             buttonColor = [UIColor colorWithRed:0.2 green:0.6 blue:0.2 alpha:0.8]; // Verde
             buttonText = @"Conectar";
+            [self stopReconnectionTimer]; // Parar timer se estiver desconectando manualmente
             break;
     }
     
@@ -285,22 +312,129 @@ static CGFloat const kCornerRadius = 22.0;
     [gesture setTranslation:CGPointZero inView:self];
 }
 
+#pragma mark - Métodos de Reconexão
+
+- (void)startReconnectionTimer {
+    [self stopReconnectionTimer]; // Garantir que não haja timer duplicado
+    
+    self.reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 // Tentar a cada 5 segundos
+                                                          target:self
+                                                        selector:@selector(tryReconnect)
+                                                        userInfo:nil
+                                                         repeats:YES];
+    
+    // Definir estado como reconectando
+    [self updateConnectionState:ConnectionStateReconnecting];
+    writeLog(@"[UI] Iniciando timer de reconexão automática");
+}
+
+- (void)stopReconnectionTimer {
+    if (self.reconnectTimer && [self.reconnectTimer isValid]) {
+        [self.reconnectTimer invalidate];
+        self.reconnectTimer = nil;
+        writeLog(@"[UI] Timer de reconexão parado");
+    }
+}
+
+- (void)tryReconnect {
+    if (!self.currentServerURL || self.connectionState == ConnectionStateConnected) {
+        [self stopReconnectionTimer];
+        return;
+    }
+    
+    writeLog(@"[UI] Tentando reconectar a %@", self.currentServerURL.absoluteString);
+    
+    @try {
+        // Tentar conexão
+        MJPEGReader *reader = [MJPEGReader sharedInstance];
+        
+        // Iniciar streaming
+        [reader startStreamingFromURL:self.currentServerURL];
+        
+        // Verificar se realmente conectou
+        if (reader.isConnected) {
+            writeLog(@"[UI] Reconexão bem-sucedida");
+            [self updateConnectionState:ConnectionStateConnected];
+            [self stopReconnectionTimer];
+        } else {
+            writeLog(@"[UI] Tentativa de reconexão falhou");
+            [self updateConnectionState:ConnectionStateReconnecting];
+        }
+    } @catch (NSException *e) {
+        writeLog(@"[UI] Erro durante tentativa de reconexão: %@", e);
+        [self updateConnectionState:ConnectionStateReconnecting];
+    }
+}
+
+#pragma mark - Tratamento de Notificações
+
+- (void)handleConnectionLost:(NSNotification *)notification {
+    // Só processar se estiver conectado ou reconectando
+    if (self.connectionState != ConnectionStateConnected &&
+        self.connectionState != ConnectionStateReconnecting) {
+        return;
+    }
+    
+    writeLog(@"[UI] Recebida notificação de conexão perdida");
+    
+    // Se temos uma URL atual, iniciar reconexão automática
+    if (self.currentServerURL) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self startReconnectionTimer];
+        });
+    } else {
+        // Sem URL, apenas marcar como desconectado
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self updateConnectionState:ConnectionStateDisconnected];
+        });
+    }
+}
+
+- (void)handleConnectionEstablished:(NSNotification *)notification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        writeLog(@"[UI] Recebida notificação de conexão estabelecida");
+        [self updateConnectionState:ConnectionStateConnected];
+    });
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self stopReconnectionTimer];
+}
+
 #pragma mark - Ações de Botões
 
 - (void)connectButtonTapped {
     @try {
+        // Se estiver reconectando, trata como desconexão
+        if (self.connectionState == ConnectionStateReconnecting) {
+            [self stopReconnectionTimer];
+            [[MJPEGReader sharedInstance] stopStreaming];
+            [[VirtualCameraController sharedInstance] stopCapturing];
+            self.currentServerURL = nil;
+            [self updateConnectionState:ConnectionStateDisconnected];
+            
+            // Salvar estado global para todos os processos
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamMJPEG_Enabled"];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            
+            return;
+        }
+        
+        // Verificar se já está conectado ou não
         BOOL isConnected = (self.connectionState == ConnectionStateConnected);
         
         if (!isConnected) {
             writeLog(@"[UI] Botão conectar pressionado");
             [self updateStatus:@"VirtualCam\nConectando..."];
             
+            // Processar URL do servidor
             NSString *serverUrl = self.serverTextField.text;
             if (![serverUrl hasPrefix:@"http://"]) {
                 serverUrl = [@"http://" stringByAppendingString:serverUrl];
             }
             
-            // Criar URL e verificar validade
+            // Validar URL
             NSURL *url = [NSURL URLWithString:serverUrl];
             if (!url) {
                 [self updateConnectionState:ConnectionStateError];
@@ -308,7 +442,15 @@ static CGFloat const kCornerRadius = 22.0;
                 return;
             }
             
-            // Ativar o VirtualCameraController
+            // Guardar URL atual para reconexões
+            self.currentServerURL = url;
+            
+            // Salvar URL nas configurações para todos os processos
+            [[NSUserDefaults standardUserDefaults] setObject:serverUrl forKey:@"VCamMJPEG_ServerURL"];
+            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamMJPEG_Enabled"];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            
+            // Ativar o VirtualCameraController primeiro
             [[VirtualCameraController sharedInstance] startCapturing];
             
             // Configurar MJPEGReader
@@ -317,7 +459,17 @@ static CGFloat const kCornerRadius = 22.0;
             // Iniciar streaming de forma protegida
             @try {
                 [reader startStreamingFromURL:url];
-                [self updateConnectionState:ConnectionStateConnected];
+                
+                // IMPORTANTE: Verificar se realmente conectou
+                if (reader.isConnected) {
+                    // Aqui está a correção principal - definir o estado explicitamente
+                    writeLog(@"[UI] Conexão bem-sucedida, mudando para estado CONECTADO");
+                    [self updateConnectionState:ConnectionStateConnected];
+                } else {
+                    // Se não conectou imediatamente, entrar em modo de reconexão
+                    writeLog(@"[UI] Falha na conexão inicial, iniciando reconexão");
+                    [self updateConnectionState:ConnectionStateReconnecting];
+                }
             } @catch (NSException *e) {
                 writeLog(@"[UI] Erro ao iniciar streaming: %@", e);
                 [self updateConnectionState:ConnectionStateError];
@@ -325,9 +477,15 @@ static CGFloat const kCornerRadius = 22.0;
         } else {
             // Desconectar de forma protegida
             @try {
+                [self stopReconnectionTimer]; // Garantir que timers são parados
                 [[MJPEGReader sharedInstance] stopStreaming];
                 [[VirtualCameraController sharedInstance] stopCapturing];
+                self.currentServerURL = nil;
                 [self updateConnectionState:ConnectionStateDisconnected];
+                
+                // Salvar estado global para todos os processos
+                [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamMJPEG_Enabled"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
             } @catch (NSException *e) {
                 writeLog(@"[UI] Erro ao parar streaming: %@", e);
                 [self updateConnectionState:ConnectionStateError];
