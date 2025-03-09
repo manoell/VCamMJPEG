@@ -181,7 +181,26 @@ static void updateCurrentCameraResolution() {
             writeLog(@"[HOOK] Exceção ao verificar estado ativo: %@", e);
         }
         
-        if (!isActive) {
+        // IMPORTANTE: Verificar explicitamente o status de conexão do MJPEGReader
+        // e o status do buffer do GetFrame
+        BOOL isConnected = NO;
+        @try {
+            MJPEGReader *reader = [MJPEGReader sharedInstance];
+            isConnected = reader.isConnected;
+            
+            // Verificar se o buffer de frame é válido
+            // Se isConnected = TRUE mas não temos frames, forçar isConnected = FALSE
+            BOOL hasFrames = [[GetFrame sharedInstance] hasFrames];
+            if (isConnected && !hasFrames) {
+                writeLog(@"[HOOK] O MJPEGReader está marcado como conectado, mas não existem frames disponíveis");
+                isConnected = NO;
+            }
+        } @catch (NSException *e) {
+            writeLog(@"[HOOK] Exceção ao verificar estado de conexão: %@", e);
+        }
+        
+        // Só substitui o feed se estiver ativo E conectado
+        if (!isActive || !isConnected) {
             %orig;
             return;
         }

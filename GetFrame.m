@@ -291,6 +291,13 @@ static NSLock *bufferLock = nil;
     return sampleBuffer;
 }
 
++ (BOOL)hasFrames {
+    [bufferLock lock];
+    BOOL hasFrames = (g_lastReceivedBuffer != NULL && CMSampleBufferIsValid(g_lastReceivedBuffer));
+    [bufferLock unlock];
+    return hasFrames;
+}
+
 // Liberar recursos ao descarregar o tweak
 + (void)cleanupResources {
     [bufferLock lock];

@@ -244,16 +244,34 @@ static NSString *gCurrentServerURL = nil;
                 self.isReconnecting = NO;
                 gGlobalReaderConnected = YES;
                 
-                // Notificar observadores da conexão bem-sucedida
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"MJPEGReaderConnectionEstablished"
-                                                                    object:self
-                                                                  userInfo:nil];
-            }
-            
-            // Verificar tipo de conteúdo para confirmar stream MJPEG
-            NSString *contentType = [httpResponse.allHeaderFields objectForKey:@"Content-Type"];
-            if (contentType) {
-                writeLog(@"[MJPEG] Content-Type: %@", contentType);
+                // CORREÇÃO CRÍTICA: Verificar o tipo de conteúdo
+                NSString *contentType = [httpResponse.allHeaderFields objectForKey:@"Content-Type"];
+                if (contentType) {
+                    writeLog(@"[MJPEG] Content-Type: %@", contentType);
+                    
+                    // Apenas considerar como conectado se for um tipo MJPEG válido
+                    if ([contentType containsString:@"multipart/x-mixed-replace"]) {
+                        writeLog(@"[MJPEG] Tipo de conteúdo MJPEG válido detectado");
+                        // Temos certeza que é um stream MJPEG
+                        self.isConnected = YES;
+                        gGlobalReaderConnected = YES;
+                        
+                        // Enviar a notificação para todos os processos
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [[NSNotificationCenter defaultCenter] postNotificationName:@"MJPEGReaderConnectionEstablished"
+                                                                             object:self
+                                                                           userInfo:nil];
+                        });
+                    } else {
+                        // Se não for multipart/x-mixed-replace, ainda pode ser uma resposta válida mas não um stream
+                        writeLog(@"[MJPEG] Aviso: Resposta válida mas não é um stream MJPEG");
+                    }
+                }
+            } else {
+                // Resposta com erro
+                self.isConnected = NO;
+                gGlobalReaderConnected = NO;
+                writeLog(@"[MJPEG] Código de resposta de erro: %ld", (long)httpResponse.statusCode);
             }
         }
         
@@ -354,6 +372,23 @@ static NSString *gCurrentServerURL = nil;
         // Adicionar log para saber se está recebendo frames - limitado a cada 300 frames
         static int frameCount = 0;
         frameCount++;
+        
+        // Para o primeiro frame processado, garantir que isConnected está TRUE
+        if (frameCount == 1) {
+            if (!self.isConnected) {
+                writeLog(@"[MJPEG] Primeiro frame processado - atualizando status de conexão");
+                self.isConnected = YES;
+                gGlobalReaderConnected = YES;
+                
+                // Enviar a notificação para todos os processos
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"MJPEGReaderConnectionEstablished"
+                                                                       object:self
+                                                                     userInfo:nil];
+                });
+            }
+        }
+        
         if (frameCount % 300 == 0) {  // Log a cada 300 frames para não encher o log
             writeLog(@"[MJPEG] Processado frame #%d (%d bytes)", frameCount, (int)jpegData.length);
         }

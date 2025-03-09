@@ -203,6 +203,8 @@ static BOOL gCaptureSystemActive = NO;
         
         // Verificar se o MJPEGReader está conectado
         MJPEGReader *reader = [MJPEGReader sharedInstance];
+        BOOL readerWasConnected = reader.isConnected;
+        
         if (!reader.isConnected) {
             writeLog(@"[CAMERA] MJPEGReader não está conectado, tentando conectar...");
             
@@ -218,9 +220,24 @@ static BOOL gCaptureSystemActive = NO;
             if (savedURL) {
                 NSURL *url = [NSURL URLWithString:savedURL];
                 if (url) {
+                    writeLog(@"[CAMERA] Tentando conectar ao servidor MJPEG: %@", savedURL);
                     [reader startStreamingFromURL:url];
+                    
+                    // Adicionar um pequeno delay para que a conexão tenha tempo de estabelecer
+                    [NSThread sleepForTimeInterval:0.1];
+                    
+                    // Verificar novamente se conectou
+                    writeLog(@"[CAMERA] Status de conexão após tentativa: %d", reader.isConnected);
                 }
             }
+        }
+        
+        // Se reader não estava conectado antes mas agora está, notificar
+        if (!readerWasConnected && reader.isConnected) {
+            writeLog(@"[CAMERA] MJPEGReader conectado com sucesso");
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"MJPEGReaderConnectionEstablished"
+                                                                object:nil
+                                                              userInfo:nil];
         }
         
         // Garantir que o callback esteja configurado
