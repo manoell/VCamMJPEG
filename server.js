@@ -90,8 +90,8 @@ const server = http.createServer(app);
 const PORT = 8080;
 const FRAME_RATE = 30;
 const QUALITY = 100;
-const WIDTH = 960;
-const HEIGHT = 1280;
+const WIDTH = 1280;
+const HEIGHT = 960;
 const BUFFER_SIZE = 5; // Número de frames a manter em buffer para suavizar entrega
 const KEEP_ALIVE_TIMEOUT = 30000; // Timeout para keep-alive em ms
 

@@ -33,82 +33,32 @@ static BOOL gCaptureSystemActive = NO;
 - (instancetype)init {
     if (self = [super init]) {
         _processingQueue = dispatch_queue_create("com.vcam.mjpeg.virtual-camera", DISPATCH_QUEUE_SERIAL);
-        
-        // Forçar leitura de configurações sincronizadas mais recentes
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        
-        // Verificar estado salvo globalmente
-        _isActive = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-        
-        // Se estamos no app da câmera, forçar ativo
-        if ([[[NSProcessInfo processInfo] processName] isEqualToString:@"Camera"]) {
-            _isActive = YES;
-        }
-        
-        writeLog(@"[CAMERA] VirtualCameraController inicializado com estado: %d (processo: %@)",
-                _isActive, [[NSProcessInfo processInfo] processName]);
-        
+        _isActive = NO;
         _debugMode = YES;
         _frameCounter = 0;
-        _preferDisplayLayerInjection = YES;
+        _preferDisplayLayerInjection = YES; // Por padrão, preferir injeção via DisplayLayer
         
         // Configurar callbacks apenas se não estivermos no SpringBoard
         if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
-            // Configurar callback para frames MJPEG apenas se estiver ativo
-            if (_isActive) {
-                MJPEGReader *reader = [MJPEGReader sharedInstance];
-                [reader setHighPriority:YES];
-                
-                __weak typeof(self) weakSelf = self;
-                reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
-                    [weakSelf processSampleBuffer:sampleBuffer];
-                };
-                
-                // Se temos um URL salvo, tentar conectar
-                NSString *savedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamMJPEG_ServerURL"];
-                if (savedURL && reader.isConnected == NO) {
-                    NSURL *url = [NSURL URLWithString:savedURL];
-                    if (url) {
-                        [reader startStreamingFromURL:url];
-                    }
-                }
-            }
+            // Configurar callback para frames MJPEG
+            MJPEGReader *reader = [MJPEGReader sharedInstance];
+            
+            // Configurar para modo de alta prioridade
+            [reader setHighPriority:YES];
+            
+            // Armazenar self fraco para evitar retenção circular
+            __weak typeof(self) weakSelf = self;
+            reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
+                [weakSelf processSampleBuffer:sampleBuffer];
+            };
         }
         
-        writeLog(@"[CAMERA] VirtualCameraController inicializado (ativo: %d)", _isActive);
+        writeLog(@"[CAMERA] VirtualCameraController inicializado e callback configurado");
     }
     return self;
 }
 
-// Adicionar método para manipular mudanças de estado
-- (void)handleVirtualCameraStateChanged:(NSNotification *)notification {
-    NSDictionary *userInfo = notification.userInfo;
-    BOOL isEnabled = [userInfo[@"isEnabled"] boolValue];
-    
-    if (isEnabled) {
-        // Ativar a câmera virtual
-        if (!self.isActive) {
-            [self startCapturing];
-            
-            // Se temos uma URL, talvez precisemos iniciar o streaming
-            NSString *serverURL = userInfo[@"serverURL"];
-            if (serverURL && ![[MJPEGReader sharedInstance] isConnected]) {
-                NSURL *url = [NSURL URLWithString:serverURL];
-                if (url) {
-                    [[MJPEGReader sharedInstance] startStreamingFromURL:url];
-                }
-            }
-        }
-    } else {
-        // Desativar a câmera virtual
-        if (self.isActive) {
-            [self stopCapturing];
-        }
-    }
-}
-
 - (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self stopCapturing];
 }
 
@@ -124,13 +74,6 @@ static BOOL gCaptureSystemActive = NO;
         return YES;
     }
     
-    // Verificar estado global
-    BOOL shouldBeActive = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-    if (!shouldBeActive) {
-        writeLog(@"[CAMERA] VirtualCameraController não será ativado - desativado via interface");
-        return NO;
-    }
-    
     // Ativar controlador
     [self startCapturing];
     
@@ -139,125 +82,50 @@ static BOOL gCaptureSystemActive = NO;
 }
 
 - (void)startCapturing {
-    @try {
-        // Verificar se estamos no SpringBoard - limitar funcionalidade
-        BOOL isSpringBoard = [[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"];
-        
-        if (isSpringBoard) {
-            writeLog(@"[CAMERA] Detectado SpringBoard - modo limitado de operação");
-            return;
-        }
-        
-        if (self.isActive) {
-            writeLog(@"[CAMERA] Captura virtual já está ativa");
-            return;
-        }
-        
-        // Verificar estado global - apenas ativar se permitido
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        
-        // Verificar nos dois lugares
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.vcam.mjpeg.defaults"];
-        BOOL shouldBeActive = NO;
-        
-        if ([defaults objectForKey:@"VCamMJPEG_Enabled"]) {
-            shouldBeActive = [defaults boolForKey:@"VCamMJPEG_Enabled"];
-        } else {
-            shouldBeActive = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMJPEG_Enabled"];
-        }
-        
-        writeLog(@"[CAMERA] Estado lido das configurações em startCapturing: %d", shouldBeActive);
-        
-        if (!shouldBeActive) {
-            NSString *caller = [NSThread callStackSymbols][1];
-            if ([caller containsString:@"AVCaptureSession"] || [caller containsString:@"startRunning"]) {
-                writeLog(@"[CAMERA] Forçando ativação pois foi chamado do hook da câmera");
-                shouldBeActive = YES;
-            } else {
-                writeLog(@"[CAMERA] VirtualCameraController não será ativado - desativado via interface");
-                return;
-            }
-        }
-        
-        writeLog(@"[CAMERA] Iniciando captura virtual (Modo: %@)",
-                 self.preferDisplayLayerInjection ? @"DisplayLayer" : @"CaptureOutput");
-        
-        // Inicializar a fila de processamento se não existir
-        if (!_processingQueue) {
-            _processingQueue = dispatch_queue_create("com.vcam.mjpeg.virtual-camera", DISPATCH_QUEUE_SERIAL);
-        }
-        
-        // Definir como ativo globalmente
-        self.isActive = YES;
-        gCaptureSystemActive = YES;
-        
-        // Também salvar no NSUserDefaults para garantir sincronização entre processos
-        NSUserDefaults *suiteDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.vcam.mjpeg.defaults"];
-        [suiteDefaults setBool:YES forKey:@"VCamMJPEG_Enabled"];
-        [suiteDefaults synchronize];
-        
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamMJPEG_Enabled"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        
-        writeLog(@"[CAMERA] Captura virtual iniciada com sucesso");
-        
-        // Verificar se o MJPEGReader está conectado
-        MJPEGReader *reader = [MJPEGReader sharedInstance];
-        BOOL readerWasConnected = reader.isConnected;
-        
-        if (!reader.isConnected) {
-            writeLog(@"[CAMERA] MJPEGReader não está conectado, tentando conectar...");
-            
-            // Tentar usar URL salva - verificar nos dois lugares
-            NSString *savedURL = nil;
-            
-            if ([defaults objectForKey:@"VCamMJPEG_ServerURL"]) {
-                savedURL = [defaults objectForKey:@"VCamMJPEG_ServerURL"];
-            } else {
-                savedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamMJPEG_ServerURL"];
-            }
-            
-            if (savedURL) {
-                NSURL *url = [NSURL URLWithString:savedURL];
-                if (url) {
-                    writeLog(@"[CAMERA] Tentando conectar ao servidor MJPEG: %@", savedURL);
-                    [reader startStreamingFromURL:url];
-                    
-                    // Adicionar um pequeno delay para que a conexão tenha tempo de estabelecer
-                    [NSThread sleepForTimeInterval:0.1];
-                    
-                    // Verificar novamente se conectou
-                    writeLog(@"[CAMERA] Status de conexão após tentativa: %d", reader.isConnected);
-                }
-            }
-        }
-        
-        // Se reader não estava conectado antes mas agora está, notificar
-        if (!readerWasConnected && reader.isConnected) {
-            writeLog(@"[CAMERA] MJPEGReader conectado com sucesso");
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"MJPEGReaderConnectionEstablished"
-                                                                object:nil
-                                                              userInfo:nil];
-        }
-        
-        // Garantir que o callback esteja configurado
-        if (!reader.sampleBufferCallback) {
-            __weak typeof(self) weakSelf = self;
-            reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
-                @autoreleasepool {
-                    [weakSelf processSampleBuffer:sampleBuffer];
-                }
-            };
-        }
-        
-        // Configurar para alta prioridade
-        [reader setHighPriority:YES];
-        
-    } @catch (NSException *e) {
-        writeLog(@"[CAMERA] Exceção em startCapturing: %@", e);
-        self.isActive = NO;
-        gCaptureSystemActive = NO;
+    // Verificar se estamos no SpringBoard - limitar funcionalidade
+    BOOL isSpringBoard = [[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"];
+    
+    if (isSpringBoard) {
+        writeLog(@"[CAMERA] Detectado SpringBoard - modo limitado de operação");
+        return;
     }
+    
+    if (self.isActive) {
+        writeLog(@"[CAMERA] Captura virtual já está ativa");
+        return;
+    }
+    
+    writeLog(@"[CAMERA] Iniciando captura virtual (Modo: %@)",
+             self.preferDisplayLayerInjection ? @"DisplayLayer" : @"CaptureOutput");
+    
+    // Inicializar a fila de processamento se não existir
+    if (!_processingQueue) {
+        _processingQueue = dispatch_queue_create("com.vcam.mjpeg.virtual-camera", DISPATCH_QUEUE_SERIAL);
+    }
+    
+    // Definir como ativo globalmente
+    gCaptureSystemActive = YES;
+    self.isActive = YES;
+    writeLog(@"[CAMERA] Captura virtual iniciada com sucesso");
+    
+    // Verificar se o MJPEGReader está conectado
+    MJPEGReader *reader = [MJPEGReader sharedInstance];
+    if (!reader.isConnected) {
+        writeLog(@"[CAMERA] MJPEGReader não está conectado, tentando conectar...");
+        NSURL *url = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
+        [reader startStreamingFromURL:url];
+    }
+    
+    // Garantir que o callback esteja configurado
+    if (!reader.sampleBufferCallback) {
+        __weak typeof(self) weakSelf = self;
+        reader.sampleBufferCallback = ^(CMSampleBufferRef sampleBuffer) {
+            [weakSelf processSampleBuffer:sampleBuffer];
+        };
+    }
+    
+    // Configurar para alta prioridade
+    [reader setHighPriority:YES];
 }
 
 - (void)stopCapturing {

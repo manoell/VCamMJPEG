@@ -37,13 +37,6 @@ static NSLock *bufferLock = nil;
     // Log limitado
     if (++callCount % 200 == 0) {
         writeLog(@"[GETFRAME] getCurrentFrame chamado %d vezes", callCount);
-        
-        // Verificar status do buffer global
-        [bufferLock lock];
-        BOOL hasBuffer = (g_lastReceivedBuffer != NULL && CMSampleBufferIsValid(g_lastReceivedBuffer));
-        [bufferLock unlock];
-        
-        writeLog(@"[GETFRAME] Status do buffer: %@ (%d)", hasBuffer ? @"Disponível" : @"Indisponível", g_isFrameReady);
     }
     
     // Obter acesso exclusivo ao buffer compartilhado
@@ -63,8 +56,51 @@ static NSLock *bufferLock = nil;
                 
                 // Se o inputBuffer for válido, precisamos copiar propriedades importantes
                 if (inputBuffer != NULL && CMSampleBufferIsValid(inputBuffer)) {
-                    // Resto do código permanece igual
-                    // ...
+                    @try {
+                        // Copiar timestamp de apresentação para manter sincronização
+                        CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(inputBuffer);
+                        CMTime duration = CMSampleBufferGetDuration(inputBuffer);
+                        
+                        // Criar timing info baseado no inputBuffer
+                        CMSampleTimingInfo timing = {0};
+                        timing.duration = duration;
+                        timing.presentationTimeStamp = presentationTime;
+                        timing.decodeTimeStamp = kCMTimeInvalid;
+                        
+                        // Criar novo buffer com timing sincronizado
+                        CMSampleBufferRef syncedBuffer = NULL;
+                        status = CMSampleBufferCreateCopyWithNewTiming(
+                            kCFAllocatorDefault,
+                            resultBuffer,
+                            1,
+                            &timing,
+                            &syncedBuffer
+                        );
+                        
+                        if (status == noErr && syncedBuffer != NULL) {
+                            // Liberar o buffer anterior
+                            CFRelease(resultBuffer);
+                            resultBuffer = syncedBuffer;
+                        }
+                        
+                        // Anexar timestamp como metadado
+                        CMSetAttachment(resultBuffer, CFSTR("FrameTimeStamp"),
+                                      (__bridge CFTypeRef)@(CMTimeGetSeconds(presentationTime)),
+                                      kCMAttachmentMode_ShouldPropagate);
+                        
+                        // Transferir outros metadados importantes se existirem
+                        CFTypeRef exifData = CMGetAttachment(inputBuffer, CFSTR("{Exif}"), NULL);
+                        if (exifData) {
+                            CMSetAttachment(resultBuffer, CFSTR("{Exif}"), exifData, kCMAttachmentMode_ShouldPropagate);
+                        }
+                        
+                        CFTypeRef tiffData = CMGetAttachment(inputBuffer, CFSTR("{TIFF}"), NULL);
+                        if (tiffData) {
+                            CMSetAttachment(resultBuffer, CFSTR("{TIFF}"), tiffData, kCMAttachmentMode_ShouldPropagate);
+                        }
+                    } @catch (NSException *e) {
+                        writeLog(@"[GETFRAME] Erro ao copiar metadados: %@", e);
+                    }
                 }
                 
                 // O chamador deve liberar este buffer quando terminar
@@ -109,26 +145,14 @@ static NSLock *bufferLock = nil;
 
 // Método para processar um novo frame MJPEG
 - (void)processNewMJPEGFrame:(CMSampleBufferRef)sampleBuffer {
-    if (sampleBuffer == NULL) {
-        return;
-    }
-    
-    // Verificação segura de validade
-    BOOL isValid = NO;
-    @try {
-        isValid = CMSampleBufferIsValid(sampleBuffer);
-    } @catch (NSException *e) {
-        writeLog(@"[GETFRAME] Exceção ao verificar validade do buffer: %@", e);
-        return;
-    }
-    
-    if (!isValid) {
+    if (sampleBuffer == NULL || !CMSampleBufferIsValid(sampleBuffer)) {
         return;
     }
     
     // Garantir que o buffer tenha uma imagem
     CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
     if (imageBuffer == NULL) {
+        writeLog(@"[GETFRAME] Frame MJPEG sem imagem válida, ignorando");
         return;
     }
     
@@ -147,12 +171,16 @@ static NSLock *bufferLock = nil;
             g_isFrameReady = YES;
             
             static int frameCount = 0;
-            if (++frameCount % 100 == 0) {
+            if (++frameCount % 300 == 0) {
+                writeLog(@"[GETFRAME] Novo frame MJPEG #%d processado e pronto para substituição", frameCount);
+                
+                // Log de dimensões
                 size_t width = CVPixelBufferGetWidth(imageBuffer);
                 size_t height = CVPixelBufferGetHeight(imageBuffer);
-                writeLog(@"[GETFRAME] Novo frame MJPEG #%d processado e pronto para substituição", frameCount);
                 writeLog(@"[GETFRAME] Dimensões do frame: %zu x %zu", width, height);
             }
+        } else {
+            writeLog(@"[GETFRAME] Erro ao copiar sample buffer: %d", (int)status);
         }
     } @catch (NSException *e) {
         writeLog(@"[GETFRAME] Exceção ao processar frame MJPEG: %@", e);
@@ -289,13 +317,6 @@ static NSLock *bufferLock = nil;
     }
     
     return sampleBuffer;
-}
-
-+ (BOOL)hasFrames {
-    [bufferLock lock];
-    BOOL hasFrames = (g_lastReceivedBuffer != NULL && CMSampleBufferIsValid(g_lastReceivedBuffer));
-    [bufferLock unlock];
-    return hasFrames;
 }
 
 // Liberar recursos ao descarregar o tweak

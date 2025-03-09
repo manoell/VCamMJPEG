@@ -12,6 +12,5 @@
 - (UIImage *)getDisplayImage;
 - (void)processNewMJPEGFrame:(CMSampleBufferRef)sampleBuffer;
 - (CMSampleBufferRef)createSampleBufferFromJPEGData:(NSData *)jpegData withSize:(CGSize)size;
-+ (BOOL)hasFrames;
 
 @end
