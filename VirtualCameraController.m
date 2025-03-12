@@ -8,9 +8,6 @@
 // Variável global para rastrear se a captura está ativa em todo o sistema
 static BOOL gCaptureSystemActive = NO;
 
-// Definição para verificação de versão do iOS
-#define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v)  ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedAscending)
-
 @interface VirtualCameraController ()
 {
     // Usar variáveis de instância para tipos C
@@ -54,6 +51,8 @@ static BOOL gCaptureSystemActive = NO;
         _isRecordingVideo = NO;
         _optimizedForVideo = NO;
         _currentURL = nil;
+        _preferredPixelFormat = kCVPixelFormatType_32BGRA; // Formato padrão
+        _currentVideoOrientation = 1; // Portrait por padrão
         
         // Configurar callbacks apenas se não estivermos no SpringBoard
         if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
@@ -85,7 +84,49 @@ static BOOL gCaptureSystemActive = NO;
              prefer ? @"AVSampleBufferDisplayLayer" : @"AVCaptureOutput");
 }
 
-// Correção específica para o método setOptimizedForVideo:
+- (void)setPreferredPixelFormat:(uint32_t)format {
+    _preferredPixelFormat = format;
+    
+    // Formato em string para log
+    NSString *formatString;
+    switch (format) {
+        case kCVPixelFormatType_32BGRA:
+            formatString = @"32BGRA";
+            break;
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+            formatString = @"420f (BiPlanar)";
+            break;
+        case kCVPixelFormatType_420YpCbCr8Planar:
+            formatString = @"420v (Planar)";
+            break;
+        default:
+            formatString = [NSString stringWithFormat:@"0x%08X", format];
+            break;
+    }
+    
+    writeLog(@"[CAMERA] Formato de pixel preferido definido para: %@", formatString);
+}
+
+- (void)setCurrentVideoOrientation:(int)orientation {
+    _currentVideoOrientation = orientation;
+    
+    // Atualizar a variável global
+    g_videoOrientation = orientation;
+    g_isVideoOrientationSet = YES;
+    
+    writeLog(@"[CAMERA] Orientação de vídeo atualizada para: %d", orientation);
+    
+    // Se estiver gravando vídeo, precisamos garantir que todos os componentes usem a mesma orientação
+    if (self.isRecordingVideo) {
+        // Atualizar o videoConnection se disponível
+        if (self.videoConnection && [self.videoConnection isVideoOrientationSupported]) {
+            AVCaptureVideoOrientation videoOrientation = (AVCaptureVideoOrientation)orientation;
+            self.videoConnection.videoOrientation = videoOrientation;
+        }
+    }
+}
+
+// Implementação para o método setOptimizedForVideo: - crítico para gravação de vídeo
 - (void)setOptimizedForVideo:(BOOL)optimized {
     if (_optimizedForVideo == optimized) return;
     
@@ -94,6 +135,13 @@ static BOOL gCaptureSystemActive = NO;
     
     // Configurar alta prioridade para o leitor MJPEG durante gravação
     [[MJPEGReader sharedInstance] setHighPriority:optimized];
+    
+    // Configurar modo de processamento para vídeo
+    if (optimized) {
+        [[MJPEGReader sharedInstance] setProcessingMode:MJPEGReaderProcessingModeHighPerformance];
+    } else {
+        [[MJPEGReader sharedInstance] setProcessingMode:MJPEGReaderProcessingModeDefault];
+    }
     
     // Atualizar flag para rastreamento
     self.isRecordingVideo = optimized;
@@ -133,8 +181,18 @@ static BOOL gCaptureSystemActive = NO;
             writeLog(@"[CAMERA] Usando resolução do diagnóstico para vídeo: %.0f x %.0f",
                   g_originalCameraResolution.width, g_originalCameraResolution.height);
         }
+        
+        // Pré-carregar alguns frames para garantir inicialização suave
+        dispatch_async(_highPriorityQueue, ^{
+            for (int i = 0; i < 5; i++) {
+                [GetFrame getCurrentFrame:NULL replace:YES];
+            }
+        });
+    } else {
+        // Modo normal - desativar otimizações específicas para vídeo
+        // Limpeza de recursos específicos para vídeo
+        [GetFrame flushVideoBuffers];
     }
-    // O bloco else tinha uma variável não utilizada, removida para corrigir o erro de compilação
 }
 
 - (BOOL)checkAndActivate {
@@ -240,6 +298,7 @@ static BOOL gCaptureSystemActive = NO;
     
     // Configurar MJPEGReader para modo normal
     [[MJPEGReader sharedInstance] setHighPriority:NO];
+    [[MJPEGReader sharedInstance] setProcessingMode:MJPEGReaderProcessingModeDefault];
     
     // Vamos também limpar a instância GetFrame para liberar buffers
     [GetFrame cleanupResources];
@@ -365,86 +424,141 @@ static BOOL gCaptureSystemActive = NO;
 
 @implementation VirtualCameraFeedReplacer
 
-// Método para substituir o buffer da câmera com um buffer de MJPEG
+// Método otimizado para substituir o buffer da câmera com um buffer de MJPEG
 + (CMSampleBufferRef)replaceCameraSampleBuffer:(CMSampleBufferRef)originalBuffer withMJPEGBuffer:(CMSampleBufferRef)mjpegBuffer {
+    // Verificações de segurança
     if (!mjpegBuffer || !CMSampleBufferIsValid(mjpegBuffer)) {
         return originalBuffer;
     }
     
-    // Verificar se o buffer MJPEG tem uma imagem válida
-    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(mjpegBuffer);
-    if (imageBuffer == NULL) {
-        return originalBuffer;
-    }
-    
-    // Criar uma cópia do buffer MJPEG para garantir segurança de memória
-    CMSampleBufferRef resultBuffer = NULL;
-    OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, mjpegBuffer, &resultBuffer);
-    
-    if (status != noErr || resultBuffer == NULL) {
-        return originalBuffer;
-    }
-    
-    // Se o originalBuffer for válido, transferir informações de timing
-    if (originalBuffer && CMSampleBufferIsValid(originalBuffer)) {
-        @try {
-            // Copiar timing do buffer original
-            CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(originalBuffer);
-            CMTime duration = CMSampleBufferGetDuration(originalBuffer);
-            
-            // Criar timing info para sincronização
-            CMSampleTimingInfo timing = {0};
-            timing.duration = duration;
-            timing.presentationTimeStamp = presentationTime;
-            timing.decodeTimeStamp = kCMTimeInvalid;
-            
-            // Criar novo buffer com timing sincronizado
-            CMSampleBufferRef syncedBuffer = NULL;
-            status = CMSampleBufferCreateCopyWithNewTiming(
-                kCFAllocatorDefault,
-                resultBuffer,
-                1,
-                &timing,
-                &syncedBuffer
-            );
-            
-            if (status == noErr && syncedBuffer != NULL) {
-                // Liberar o buffer anterior
-                CFRelease(resultBuffer);
-                resultBuffer = syncedBuffer;
-            }
-            
-            // Transferir metadados importantes
-            // Orientação
-            CFTypeRef orientationAttachment = CMGetAttachment(originalBuffer, CFSTR("VideoOrientation"), NULL);
-            if (orientationAttachment) {
-                CMSetAttachment(resultBuffer, CFSTR("VideoOrientation"),
-                               orientationAttachment, kCMAttachmentMode_ShouldPropagate);
-            }
-            
-            // Outros metadados comuns - Corrigido para usar @[] ao invés de CFStringRef direto
-            NSArray *metadataKeys = @[
-                (id)CFSTR("CVImageBufferYCbCrMatrix"),
-                (id)CFSTR("CVImageBufferColorPrimaries"),
-                (id)CFSTR("CVImageBufferTransferFunction"),
-                (id)CFSTR("CVFieldCount"),
-                (id)CFSTR("CVFieldDetail")
-            ];
-            
-            for (id key in metadataKeys) {
-                CFTypeRef attachment = CMGetAttachment(originalBuffer, (CFStringRef)key, NULL);
-                if (attachment) {
-                    CMSetAttachment(resultBuffer, (CFStringRef)key,
-                                  attachment, kCMAttachmentMode_ShouldPropagate);
-                }
-            }
-        } @catch (NSException *e) {
-            // Em caso de erro, continuar com o buffer não sincronizado
-            writeLog(@"[CAMERA] Erro ao sincronizar buffer: %@", e);
+    if (!originalBuffer || !CMSampleBufferIsValid(originalBuffer)) {
+        // Se não tivermos buffer original válido, retornar uma cópia do MJPEG
+        CMSampleBufferRef resultBuffer = NULL;
+        OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, mjpegBuffer, &resultBuffer);
+        
+        if (status == noErr && resultBuffer != NULL) {
+            return resultBuffer;
+        } else {
+            // Se falhar, retornar o mjpegBuffer com retain
+            CFRetain(mjpegBuffer);
+            return mjpegBuffer;
         }
     }
     
-    // Retornar a cópia do buffer MJPEG (possivelmente com timing atualizado)
+    // Extrair informações importantes do buffer original
+    CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(originalBuffer);
+    CMTime duration = CMSampleBufferGetDuration(originalBuffer);
+    
+    // Verificar se os tempos são válidos
+    if (!CMTIME_IS_VALID(presentationTime)) {
+        presentationTime = CMTimeMakeWithSeconds(CACurrentMediaTime(), 90000);
+    }
+    
+    if (!CMTIME_IS_VALID(duration)) {
+        duration = CMTimeMake(1, 30); // Assumindo 30 fps
+    }
+    
+    // Criar timing info
+    CMSampleTimingInfo timing = {
+        .duration = duration,
+        .presentationTimeStamp = presentationTime,
+        .decodeTimeStamp = kCMTimeInvalid
+    };
+    
+    // Criar cópia do buffer com o timing correto
+    CMSampleBufferRef resultBuffer = NULL;
+    OSStatus status = CMSampleBufferCreateCopyWithNewTiming(
+        kCFAllocatorDefault,
+        mjpegBuffer,
+        1,
+        &timing,
+        &resultBuffer
+    );
+    
+    if (status != noErr || resultBuffer == NULL) {
+        // Se falhar, retornar o buffer original
+        return originalBuffer;
+    }
+    
+    // Transferir todos os metadados importantes do buffer original
+    NSDictionary *metadataKeys = @{
+        // Orientação de vídeo
+        (id)CFSTR("VideoOrientation"): @"Orientação",
+        
+        // Informações de colorimetria
+        (id)CFSTR("CVImageBufferYCbCrMatrix"): @"Matriz YCbCr",
+        (id)CFSTR("CVImageBufferColorPrimaries"): @"Primárias de cor",
+        (id)CFSTR("CVImageBufferTransferFunction"): @"Função de transferência",
+        
+        // Informações de campo de vídeo
+        (id)CFSTR("CVFieldCount"): @"Contagem de campos",
+        (id)CFSTR("CVFieldDetail"): @"Detalhe de campo",
+        
+        // Informações de hardware
+        (id)CFSTR("CameraIntrinsicMatrix"): @"Matriz intrínseca",
+        
+        // Timestamps
+        (id)CFSTR("FrameTimeStamp"): @"Timestamp do frame"
+    };
+    
+    // Transferir todos os metadados existentes
+    for (NSString *key in metadataKeys.allKeys) {
+        CFTypeRef attachment = CMGetAttachment(originalBuffer, (CFStringRef)key, NULL);
+        if (attachment) {
+            CMSetAttachment(resultBuffer, (CFStringRef)key, attachment, kCMAttachmentMode_ShouldPropagate);
+        }
+    }
+    
+    // Se o buffer original tem informações de orientação, transferi-las
+    CFTypeRef orientationAttachment = CMGetAttachment(originalBuffer, CFSTR("VideoOrientation"), NULL);
+    if (orientationAttachment) {
+        CMSetAttachment(resultBuffer, CFSTR("VideoOrientation"),
+                      orientationAttachment, kCMAttachmentMode_ShouldPropagate);
+    } else if (g_isVideoOrientationSet) {
+        // Se não tem orientação no buffer original, mas temos a orientação global
+        uint32_t orientation = g_videoOrientation;
+        CFNumberRef orientationValue = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &orientation);
+        if (orientationValue) {
+            CMSetAttachment(resultBuffer, CFSTR("VideoOrientation"), orientationValue, kCMAttachmentMode_ShouldPropagate);
+            CFRelease(orientationValue);
+        }
+    }
+    
+    // Cópia exata dos attachments do formato para garantir compatibilidade total
+    CMFormatDescriptionRef origFormatDesc = CMSampleBufferGetFormatDescription(originalBuffer);
+    CMFormatDescriptionRef newFormatDesc = CMSampleBufferGetFormatDescription(resultBuffer);
+
+    if (origFormatDesc && newFormatDesc) {
+        // Verificar e preservar extensões críticas para codecs de vídeo
+        CFDictionaryRef origExtensions = CMFormatDescriptionGetExtensions(origFormatDesc);
+        if (origExtensions) {
+            // Copiar extensões individualmente já que não podemos copiar o dicionário inteiro
+            CFStringRef keys[] = {
+                CFSTR("FormatDescriptionExtensionMaxKeyLengthKey"),
+                CFSTR("FormatDescriptionExtensionWaveFormatKey"),
+                CFSTR("FormatDescriptionExtensionTokenKey"),
+                CFSTR("FormatDescriptionExtensionVerticalBlankingKey"),
+                CFSTR("FormatDescriptionExtensionCleanApertureKey"),
+                CFSTR("FormatDescriptionExtensionFieldCountKey"),
+                CFSTR("FormatDescriptionExtensionFieldDetailKey"),
+                CFSTR("FormatDescriptionExtensionPixelAspectRatioKey"),
+                CFSTR("FormatDescriptionExtensionColorPrimariesKey"),
+                CFSTR("FormatDescriptionExtensionTransferFunctionKey"),
+                CFSTR("FormatDescriptionExtensionYCbCrMatrixKey"),
+                CFSTR("FormatDescriptionExtensionChromaLocationKey"),
+                CFSTR("FormatDescriptionExtensionCodecSpecificKey")
+            };
+            
+            for (int i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
+                CFTypeRef value = CFDictionaryGetValue(origExtensions, keys[i]);
+                if (value) {
+                    // Não existe CMFormatDescriptionSetExtensions, então temos que anexar individualmente
+                    CMSetFormatDescriptionExtension(newFormatDesc, keys[i], value);
+                }
+            }
+        }
+    }
+    
     return resultBuffer;
 }
 
@@ -469,8 +583,10 @@ static BOOL gCaptureSystemActive = NO;
         
         writeLog(@"[PHOTOPROXY] Interceptando didFinishProcessingPhotoSampleBuffer");
         
-        // Obter buffer de substituição
+        // Obter buffer de substituição - modo de alta qualidade para fotos
+        [[MJPEGReader sharedInstance] setProcessingMode:MJPEGReaderProcessingModeHighQuality];
         CMSampleBufferRef mjpegBuffer = photoSampleBuffer ? [GetFrame getCurrentFrame:photoSampleBuffer replace:YES] : nil;
+        [[MJPEGReader sharedInstance] setProcessingMode:MJPEGReaderProcessingModeDefault];
         
         if (mjpegBuffer && CMSampleBufferIsValid(mjpegBuffer)) {
             writeLog(@"[PHOTOPROXY] Substituindo buffer na finalização da captura de foto");
@@ -561,70 +677,6 @@ static BOOL gCaptureSystemActive = NO;
             g_isCapturingPhoto = NO;
             writeLog(@"[PHOTOPROXY] Captura de foto concluída");
         });
-    }
-}
-
-// Implementações para outros métodos do protocolo AVCapturePhotoCaptureDelegate
-// Adicione conforme necessário
-
-// Método para encaminhar mensagens desconhecidas para o delegate original
-- (BOOL)respondsToSelector:(SEL)aSelector {
-    return [super respondsToSelector:aSelector] || [self.originalDelegate respondsToSelector:aSelector];
-}
-
-- (id)forwardingTargetForSelector:(SEL)aSelector {
-    if ([self.originalDelegate respondsToSelector:aSelector]) {
-        return self.originalDelegate;
-    }
-    return [super forwardingTargetForSelector:aSelector];
-}
-
-@end
-
-@implementation VideoRecordingProxy
-
-+ (instancetype)proxyWithDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
-    VideoRecordingProxy *proxy = [[VideoRecordingProxy alloc] init];
-    proxy.originalDelegate = delegate;
-    return proxy;
-}
-
-#pragma mark - AVCaptureFileOutputRecordingDelegate Methods
-
-// Método chamado quando a gravação começa
-- (void)captureOutput:(AVCaptureFileOutput *)output didStartRecordingToOutputFileAtURL:(NSURL *)fileURL fromConnections:(NSArray<AVCaptureConnection *> *)connections {
-    writeLog(@"[VIDEOPROXY] didStartRecordingToOutputFileAtURL: %@", fileURL.absoluteString);
-    
-    // Ativar modo de vídeo otimizado
-    if ([[VirtualCameraController sharedInstance] respondsToSelector:@selector(setOptimizedForVideo:)]) {
-        [[VirtualCameraController sharedInstance] setOptimizedForVideo:YES];
-    }
-    
-    // Ativar modo de alta prioridade para MJPEG
-    [[MJPEGReader sharedInstance] setHighPriority:YES];
-    
-    // Redirecionar para o delegate original
-    if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didStartRecordingToOutputFileAtURL:fromConnections:)]) {
-        [self.originalDelegate captureOutput:output didStartRecordingToOutputFileAtURL:fileURL fromConnections:connections];
-    }
-}
-
-// Método chamado quando a gravação termina
-- (void)captureOutput:(AVCaptureFileOutput *)output didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL fromConnections:(NSArray<AVCaptureConnection *> *)connections error:(NSError *)error {
-    writeLog(@"[VIDEOPROXY] didFinishRecordingToOutputFileAtURL: %@, error: %@",
-             outputFileURL.absoluteString, error ? error.localizedDescription : @"Sem erro");
-    
-    // Desativar modo de vídeo otimizado
-    if ([[VirtualCameraController sharedInstance] respondsToSelector:@selector(setOptimizedForVideo:)]) {
-        [[VirtualCameraController sharedInstance] setOptimizedForVideo:NO];
-    }
-    
-    // Desativar modo de alta prioridade
-    [[MJPEGReader sharedInstance] setHighPriority:NO];
-    
-    // Redirecionar para o delegate original
-    if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didFinishRecordingToOutputFileAtURL:fromConnections:error:)]) {
-        [self.originalDelegate captureOutput:output didFinishRecordingToOutputFileAtURL:outputFileURL fromConnections:connections error:error];
     }
 }
 

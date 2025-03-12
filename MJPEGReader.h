@@ -4,9 +4,9 @@
 
 // Definir modos de processamento
 typedef NS_ENUM(NSInteger, MJPEGReaderProcessingMode) {
-    MJPEGReaderProcessingModeDefault = 0,           // Modo padrão
-    MJPEGReaderProcessingModeHighPerformance = 1,   // Alta performance - otimizado para vídeo
-    MJPEGReaderProcessingModeHighQuality = 2        // Alta qualidade - otimizado para fotos
+   MJPEGReaderProcessingModeDefault = 0,           // Modo padrão
+   MJPEGReaderProcessingModeHighPerformance = 1,   // Alta performance - otimizado para vídeo
+   MJPEGReaderProcessingModeHighQuality = 2        // Alta qualidade - otimizado para fotos
 };
 
 // Leitor de MJPEG
@@ -30,5 +30,6 @@ typedef NS_ENUM(NSInteger, MJPEGReaderProcessingMode) {
 - (void)stopStreaming;
 - (CMSampleBufferRef)createSampleBufferFromJPEGData:(NSData *)jpegData withSize:(CGSize)size;
 - (void)setHighPriority:(BOOL)enabled; // Método para configurar prioridade
+- (void)setProcessingMode:(MJPEGReaderProcessingMode)mode; // Método para configurar modo de processamento
 
 @end

@@ -3,17 +3,6 @@
 // Grupo para hooks relacionados a UI e imagens
 %group UIHooks
 
-// Mapeamento consistente da orientação de vídeo para UIImageOrientation
-static UIImageOrientation getOrientationFromVideoOrientation(int videoOrientation) {
-    switch (videoOrientation) {
-        case 1: return UIImageOrientationUp;    // Portrait
-        case 2: return UIImageOrientationDown;  // Portrait upside down
-        case 3: return UIImageOrientationLeft;  // Landscape Right -> Left (invertido na lógica UIImage)
-        case 4: return UIImageOrientationRight; // Landscape Left -> Right (invertido na lógica UIImage)
-        default: return UIImageOrientationUp;   // Default to portrait
-    }
-}
-
 // Hook para UIImage para interceptar a geração de miniaturas
 %hook UIImage
 

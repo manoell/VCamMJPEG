@@ -20,12 +20,15 @@ extern CGSize g_originalCameraResolution;
 extern CGSize g_originalFrontCameraResolution;
 extern CGSize g_originalBackCameraResolution;
 extern BOOL g_usingFrontCamera;
-extern BOOL g_isRecordingVideo; // Nova - Indica se estamos gravando vídeo
+extern BOOL g_isRecordingVideo; // Indica se estamos gravando vídeo
 
 // Função para registro de delegados ativos
 void logDelegates(void);
 
 // Função para detectar dimensões da câmera
 void detectCameraResolutions(void);
+
+// Nova função para mapeamento de orientação
+UIImageOrientation getOrientationFromVideoOrientation(int videoOrientation);
 
 #endif /* GLOBALS_H */

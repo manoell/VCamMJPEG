@@ -28,6 +28,10 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
 @property (nonatomic, assign) CGFloat currentFPS;
 @property (nonatomic, strong) NSLock *bufferLock;
 
+// Cache para processamento mais rápido
+@property (nonatomic, strong) NSCache *formatsCache;
+@property (nonatomic, strong) CVPixelBufferPoolRef pixelBufferPool;
+
 @end
 
 @implementation MJPEGReader
@@ -66,6 +70,11 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
         self.lastReceivedSampleBuffer = NULL;
         self.highPriorityMode = NO;
         self.bufferLock = [[NSLock alloc] init];
+        self.processingMode = MJPEGReaderProcessingModeDefault;
+        
+        // Inicializar cache
+        self.formatsCache = [[NSCache alloc] init];
+        self.formatsCache.countLimit = 5; // Limita a 5 formatos diferentes
         
         // Inicializar contadores FPS
         self.lastFrameTime = CACurrentMediaTime();
@@ -95,9 +104,64 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
     return self;
 }
 
+- (void)dealloc {
+    [self stopStreaming];
+    
+    if (self.lastReceivedSampleBuffer) {
+        CFRelease(self.lastReceivedSampleBuffer);
+        self.lastReceivedSampleBuffer = NULL;
+    }
+    
+    if (self.pixelBufferPool) {
+        CVPixelBufferPoolRelease(self.pixelBufferPool);
+        self.pixelBufferPool = NULL;
+    }
+}
+
 - (void)setHighPriority:(BOOL)enabled {
     self.highPriorityMode = enabled;
     writeLog(@"[MJPEG] Modo de alta prioridade %@", enabled ? @"ATIVADO" : @"DESATIVADO");
+    
+    // Se o modo de alta prioridade for ativado, também ajustamos a prioridade da task
+    if (self.dataTask && enabled) {
+        self.dataTask.priority = NSURLSessionTaskPriorityHigh;
+    } else if (self.dataTask) {
+        self.dataTask.priority = NSURLSessionTaskPriorityDefault;
+    }
+}
+
+- (void)setProcessingMode:(MJPEGReaderProcessingMode)mode {
+    _processingMode = mode;
+    
+    writeLog(@"[MJPEG] Modo de processamento alterado para: %@",
+             mode == MJPEGReaderProcessingModeHighPerformance ? @"Alta Performance" :
+             mode == MJPEGReaderProcessingModeHighQuality ? @"Alta Qualidade" : @"Padrão");
+    
+    // Ajustar as configurações baseado no modo
+    switch (mode) {
+        case MJPEGReaderProcessingModeHighPerformance:
+            // Otimizado para vídeo: maior taxa de frames, menor latência
+            dispatch_set_target_queue(_processingQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
+            dispatch_set_target_queue(_highPriorityQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
+            
+            // Pré-alocar buffer maior para performance
+            if (self.buffer.length < 1024 * 1024) {
+                self.buffer = [NSMutableData dataWithCapacity:2 * 1024 * 1024]; // 2MB
+            }
+            break;
+            
+        case MJPEGReaderProcessingModeHighQuality:
+            // Otimizado para fotos: qualidade mais alta, maior fidelidade
+            dispatch_set_target_queue(_processingQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+            dispatch_set_target_queue(_highPriorityQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
+            break;
+            
+        default: // MJPEGReaderProcessingModeDefault
+            // Configuração balanceada
+            dispatch_set_target_queue(_processingQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+            dispatch_set_target_queue(_highPriorityQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+            break;
+    }
 }
 
 - (void)startStreamingFromURL:(NSURL *)url {
@@ -222,15 +286,15 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
         [self.bufferLock lock];
         [self.buffer setLength:0];
         [self.bufferLock unlock];
-    }
-}
-
-- (void)dealloc {
-    [self stopStreaming];
-    
-    if (self.lastReceivedSampleBuffer) {
-        CFRelease(self.lastReceivedSampleBuffer);
-        self.lastReceivedSampleBuffer = NULL;
+        
+        // Limpar cache de formatos
+        [self.formatsCache removeAllObjects];
+        
+        // Liberar pool de buffers de pixels
+        if (self.pixelBufferPool) {
+            CVPixelBufferPoolRelease(self.pixelBufferPool);
+            self.pixelBufferPool = NULL;
+        }
     }
 }
 
@@ -385,7 +449,11 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
             NSData *jpegData = [self.buffer subdataWithRange:NSMakeRange(frameStart, frameEnd - frameStart)];
             
             // Processar o frame em outra thread para não bloquear
-            dispatch_async(self.highPriorityMode ? _highPriorityQueue : _imageProcessingQueue, ^{
+            dispatch_queue_t processingQueue = (self.processingMode == MJPEGReaderProcessingModeHighPerformance)
+                ? _highPriorityQueue
+                : _imageProcessingQueue;
+            
+            dispatch_async(processingQueue, ^{
                 [self processJPEGData:jpegData];
             });
             
@@ -450,68 +518,265 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
             writeLog(@"[MJPEG] Processado frame #%d (%d bytes)", frameCount, (int)jpegData.length);
         }
         
-        // Criar imagem a partir dos dados JPEG - mover para GetFrame para processamento mais eficiente
-        UIImage *image = [UIImage imageWithData:jpegData];
+        // Criar imagem a partir dos dados JPEG para visualização/preview
+        UIImage *image = nil;
         
-        if (image) {
-            // Atualizar resolução conhecida
-            if (!CGSizeEqualToSize(image.size, self.lastKnownResolution)) {
-                self.lastKnownResolution = image.size;
-                writeLog(@"[MJPEG] Nova resolução detectada: %.0f x %.0f", image.size.width, image.size.height);
-            }
+        // Se estamos no modo de alta qualidade ou temos um callback de frame, decodificar a imagem
+        if (self.processingMode == MJPEGReaderProcessingModeHighQuality || self.frameCallback) {
+            image = [UIImage imageWithData:jpegData];
             
-            // Chamar callback de frame se existir (para preview)
-            if (self.frameCallback) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    self.frameCallback(image);
-                });
-            }
-            
-            // Converter para CMSampleBuffer utilizando o método de GetFrame que é mais eficiente
-            CMSampleBufferRef sampleBuffer = [[GetFrame sharedInstance] createSampleBufferFromJPEGData:jpegData withSize:image.size];
-            
-            if (sampleBuffer && CMSampleBufferIsValid(sampleBuffer)) {
-                // Enviar diretamente para GetFrame para processamento - MÉTODO CRÍTICO
-                [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
-                
-                // Garantir que a orientação está corretamente definida - só usar se Global.h estiver importado
-                if (g_isVideoOrientationSet) {
-                    // Definir orientação como metadado do buffer
-                    uint32_t orientation = g_videoOrientation;
-                    CFNumberRef orientationValue = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &orientation);
-                    if (orientationValue) {
-                        CMSetAttachment(sampleBuffer, CFSTR("VideoOrientation"), orientationValue, kCMAttachmentMode_ShouldPropagate);
-                        CFRelease(orientationValue);
-                    }
+            if (image) {
+                // Atualizar resolução conhecida
+                if (!CGSizeEqualToSize(image.size, self.lastKnownResolution)) {
+                    self.lastKnownResolution = image.size;
+                    writeLog(@"[MJPEG] Nova resolução detectada: %.0f x %.0f", image.size.width, image.size.height);
                 }
                 
-                // Liberar o sampleBuffer após uso
-                CFRelease(sampleBuffer);
+                // Chamar callback de frame se existir (para preview)
+                if (self.frameCallback) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        self.frameCallback(image);
+                    });
+                }
+            }
+        }
+        
+        // Converter para CMSampleBuffer utilizando o método otimizado
+        CMSampleBufferRef sampleBuffer = [self createOptimizedSampleBufferFromJPEGData:jpegData
+                                                               withSize:self.lastKnownResolution];
+        
+        if (sampleBuffer && CMSampleBufferIsValid(sampleBuffer)) {
+            // Enviar diretamente para GetFrame para processamento - MÉTODO CRÍTICO
+            [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
+            
+            // Garantir que a orientação está corretamente definida
+            if (g_isVideoOrientationSet) {
+                // Definir orientação como metadado do buffer
+                uint32_t orientation = g_videoOrientation;
+                CFNumberRef orientationValue = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &orientation);
+                if (orientationValue) {
+                    CMSetAttachment(sampleBuffer, CFSTR("VideoOrientation"), orientationValue, kCMAttachmentMode_ShouldPropagate);
+                    CFRelease(orientationValue);
+                }
+            }
+            
+            // Liberar o sampleBuffer após uso
+            CFRelease(sampleBuffer);
+        } else if (image) {
+            // Fallback para o método anterior se o otimizado falhar
+            CMSampleBufferRef fallbackBuffer = [[GetFrame sharedInstance] createSampleBufferFromJPEGData:jpegData
+                                                                                              withSize:image.size];
+            
+            if (fallbackBuffer) {
+                [[GetFrame sharedInstance] processNewMJPEGFrame:fallbackBuffer];
+                CFRelease(fallbackBuffer);
             }
         } else {
-            writeLog(@"[MJPEG] Falha ao criar imagem a partir dos dados JPEG");
+            writeLog(@"[MJPEG] Falha ao criar sample buffer a partir dos dados JPEG");
         }
     }
 }
 
-// Método para criar um CMSampleBuffer a partir de dados JPEG - mantido por compatibilidade
+// Método otimizado para criar CMSampleBuffer a partir de dados JPEG
+- (CMSampleBufferRef)createOptimizedSampleBufferFromJPEGData:(NSData *)jpegData withSize:(CGSize)size {
+   if (!jpegData || jpegData.length == 0) {
+       return NULL;
+   }
+   
+   // Usar um cache para formatDescription - isso melhora performance significativamente
+   NSString *cacheKey = [NSString stringWithFormat:@"%.0fx%.0f", size.width, size.height];
+   CMFormatDescriptionRef formatDesc = (__bridge CMFormatDescriptionRef)[self.formatsCache objectForKey:cacheKey];
+   
+   // Step 1: Criar um CVPixelBuffer otimizado
+   CVPixelBufferRef pixelBuffer = NULL;
+   CVReturn cvReturn = kCVReturnSuccess;
+   
+   // Tentar usar um pool de pixel buffers para melhorar performance
+   if (self.pixelBufferPool == NULL ||
+       CVPixelBufferPoolGetWidth(self.pixelBufferPool) != size.width ||
+       CVPixelBufferPoolGetHeight(self.pixelBufferPool) != size.height) {
+       
+       // Criar um novo pool com as dimensões corretas
+       if (self.pixelBufferPool) {
+           CVPixelBufferPoolRelease(self.pixelBufferPool);
+           self.pixelBufferPool = NULL;
+       }
+       
+       NSDictionary *poolAttributes = @{
+           (id)kCVPixelBufferPoolMinimumBufferCountKey: @(3)  // Manter pelo menos 3 buffers no pool
+       };
+       
+       NSDictionary *pixelBufferAttributes = @{
+           (id)kCVPixelBufferWidthKey: @(size.width),
+           (id)kCVPixelBufferHeightKey: @(size.height),
+           (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+           (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
+           (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
+           (id)kCVPixelBufferMetalCompatibilityKey: @YES
+       };
+       
+       cvReturn = CVPixelBufferPoolCreate(kCFAllocatorDefault,
+                                       (__bridge CFDictionaryRef)poolAttributes,
+                                       (__bridge CFDictionaryRef)pixelBufferAttributes,
+                                       &_pixelBufferPool);
+       
+       if (cvReturn != kCVReturnSuccess) {
+           writeLog(@"[MJPEG] Falha ao criar pool de pixel buffers: %d", cvReturn);
+           return NULL;
+       }
+   }
+   
+   // Obter um buffer do pool
+   cvReturn = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, self.pixelBufferPool, &pixelBuffer);
+   
+   if (cvReturn != kCVReturnSuccess) {
+       writeLog(@"[MJPEG] Falha ao obter buffer do pool: %d", cvReturn);
+       return NULL;
+   }
+   
+   // Step 2: Decodificar o JPEG para o pixel buffer
+   // Criar um CGImage a partir dos dados JPEG
+   CGDataProviderRef dataProvider = CGDataProviderCreateWithData(NULL, jpegData.bytes, jpegData.length, NULL);
+   CGImageRef cgImage = CGImageCreateWithJPEGDataProvider(dataProvider, NULL, true, kCGRenderingIntentDefault);
+   CGDataProviderRelease(dataProvider);
+   
+   if (cgImage == NULL) {
+       CVPixelBufferRelease(pixelBuffer);
+       return NULL;
+   }
+   
+   // Bloquear o buffer para escrita
+   CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+   
+   // Obter o ponteiro para os dados do buffer
+   void *baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer);
+   size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
+   
+   // Configurar contexto para desenhar a imagem no buffer
+   CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+   CGContextRef context = CGBitmapContextCreate(baseAddress,
+                                             size.width,
+                                             size.height,
+                                             8,
+                                             bytesPerRow,
+                                             colorSpace,
+                                             kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
+   CGColorSpaceRelease(colorSpace);
+   
+   if (context == NULL) {
+       CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+       CVPixelBufferRelease(pixelBuffer);
+       CGImageRelease(cgImage);
+       return NULL;
+   }
+   
+   // Limpar o contexto para evitar artefatos
+   CGContextClearRect(context, CGRectMake(0, 0, size.width, size.height));
+   
+   // Configurar qualidade de interpolação baseada no modo
+   if (self.processingMode == MJPEGReaderProcessingModeHighQuality) {
+       CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+   } else {
+       CGContextSetInterpolationQuality(context, kCGInterpolationMedium);
+   }
+   
+   // Desenhar a imagem no contexto com a orientação correta
+   CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), cgImage);
+   
+   // Liberar recursos
+   CGContextRelease(context);
+   CGImageRelease(cgImage);
+   
+   // Desbloquear o buffer
+   CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+   
+   // Step 3: Criar ou reutilizar a descrição de formato
+   if (formatDesc == NULL) {
+       // Criar nova descrição de formato se não estiver em cache
+       CVReturn status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDesc);
+       
+       if (status != noErr) {
+           CVPixelBufferRelease(pixelBuffer);
+           return NULL;
+       }
+       
+       // Armazenar no cache
+       [self.formatsCache setObject:(__bridge id)formatDesc forKey:cacheKey];
+   }
+   
+   // Step 4: Criar o SampleBuffer com timestamp preciso
+   CMSampleBufferRef sampleBuffer = NULL;
+   
+   // Configurar timing info
+   CMSampleTimingInfo timing;
+   timing.duration = CMTimeMake(1, 30); // 30 fps
+   timing.presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 90000);
+   timing.decodeTimeStamp = kCMTimeInvalid;
+   
+   // Criar sample buffer
+   OSStatus status = CMSampleBufferCreateForImageBuffer(
+       kCFAllocatorDefault,
+       pixelBuffer,
+       true,
+       NULL,
+       NULL,
+       formatDesc,
+       &timing,
+       &sampleBuffer
+   );
+   
+   // Liberar recursos
+   CFRelease(formatDesc); // O cache retém uma cópia
+   CVPixelBufferRelease(pixelBuffer);
+   
+   if (status != noErr || !sampleBuffer) {
+       return NULL;
+   }
+   
+   // Adicionar metadados
+   if (g_isVideoOrientationSet) {
+       // Adicionar orientação como attachment
+       uint32_t orientation = g_videoOrientation;
+       CFNumberRef orientationValue = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &orientation);
+       if (orientationValue) {
+           CMSetAttachment(sampleBuffer, CFSTR("VideoOrientation"), orientationValue, kCMAttachmentMode_ShouldPropagate);
+           CFRelease(orientationValue);
+       }
+   }
+   
+   // Adicionar timestamp como metadado
+   CMSetAttachment(sampleBuffer, CFSTR("FrameTimeStamp"),
+                 (__bridge CFTypeRef)@(CACurrentMediaTime()),
+                 kCMAttachmentMode_ShouldPropagate);
+   
+   // Log limitado
+   static int sampleBufferCount = 0;
+   if (sampleBufferCount++ % 300 == 0) {
+       writeLog(@"[MJPEG] SampleBuffer #%d criado com sucesso (dimensões: %.0f x %.0f)",
+               sampleBufferCount, size.width, size.height);
+   }
+   
+   return sampleBuffer;
+}
+
+// Método para compatibilidade com versões anteriores
 - (CMSampleBufferRef)createSampleBufferFromJPEGData:(NSData *)jpegData withSize:(CGSize)size {
-    // Usar o método da classe GetFrame, que é mais eficiente e mantém compatibilidade
-    return [[GetFrame sharedInstance] createSampleBufferFromJPEGData:jpegData withSize:size];
+   // Usar o método otimizado
+   return [self createOptimizedSampleBufferFromJPEGData:jpegData withSize:size];
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    if (error) {
-        if (error.code != NSURLErrorCancelled) { // Ignore cancelamento intencional
-            writeLog(@"[MJPEG] Erro no streaming: %@", error);
-            [self resetWithError:error];
-        }
-    } else {
-        writeLog(@"[MJPEG] Streaming concluído");
-        self.isConnected = NO;
-        self.isReconnecting = NO;
-        gGlobalReaderConnected = NO;
-    }
+   if (error) {
+       if (error.code != NSURLErrorCancelled) { // Ignore cancelamento intencional
+           writeLog(@"[MJPEG] Erro no streaming: %@", error);
+           [self resetWithError:error];
+       }
+   } else {
+       writeLog(@"[MJPEG] Streaming concluído");
+       self.isConnected = NO;
+       self.isReconnecting = NO;
+       gGlobalReaderConnected = NO;
+   }
 }
 
 @end
