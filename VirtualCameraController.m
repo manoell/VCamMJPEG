@@ -51,6 +51,9 @@ static BOOL gCaptureSystemActive = NO;
         _lastFrameTime = 0;
         _framesThisSecond = 0;
         _currentFPS = 0;
+        _isRecordingVideo = NO;
+        _optimizedForVideo = NO;
+        _currentURL = nil;
         
         // Configurar callbacks apenas se não estivermos no SpringBoard
         if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
@@ -80,6 +83,58 @@ static BOOL gCaptureSystemActive = NO;
     _preferDisplayLayerInjection = prefer;
     writeLog(@"[CAMERA] Modo de injeção definido para: %@",
              prefer ? @"AVSampleBufferDisplayLayer" : @"AVCaptureOutput");
+}
+
+// Correção específica para o método setOptimizedForVideo:
+- (void)setOptimizedForVideo:(BOOL)optimized {
+    if (_optimizedForVideo == optimized) return;
+    
+    _optimizedForVideo = optimized;
+    writeLog(@"[CAMERA] Modo otimizado para vídeo: %@", optimized ? @"ATIVADO" : @"DESATIVADO");
+    
+    // Configurar alta prioridade para o leitor MJPEG durante gravação
+    [[MJPEGReader sharedInstance] setHighPriority:optimized];
+    
+    // Atualizar flag para rastreamento
+    self.isRecordingVideo = optimized;
+    g_isRecordingVideo = optimized; // Atualizar variável global também
+    
+    if (optimized) {
+        // Configurações específicas para vídeo
+        // Com base nas informações do diagnóstico (formato 420f)
+        
+        // Verificar se temos um leitor MJPEG conectado, caso contrário, tentar reconectar
+        MJPEGReader *mjpegReader = [MJPEGReader sharedInstance];
+        if (!mjpegReader.isConnected) {
+            writeLog(@"[CAMERA] Tentando reconectar MJPEG para gravação de vídeo");
+            if (self.currentURL) {
+                [mjpegReader startStreamingFromURL:self.currentURL];
+            } else {
+                // URL padrão como fallback
+                NSURL *url = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
+                [mjpegReader startStreamingFromURL:url];
+            }
+        }
+        
+        // Configurar para usar as dimensões da câmera do diagnóstico se disponíveis
+        if (CGSizeEqualToSize(g_originalCameraResolution, CGSizeZero)) {
+            // Usar dimensões do diagnóstico
+            if (g_usingFrontCamera) {
+                // Para câmera frontal, poderia usar outra resolução se necessário
+                g_originalFrontCameraResolution = CGSizeMake(1334, 750);
+            } else {
+                // Usar dimensões da câmera traseira do diagnóstico
+                g_originalBackCameraResolution = CGSizeMake(4032, 3024);
+            }
+            
+            // Atualizar resolução atual
+            g_originalCameraResolution = g_usingFrontCamera ? g_originalFrontCameraResolution : g_originalBackCameraResolution;
+            
+            writeLog(@"[CAMERA] Usando resolução do diagnóstico para vídeo: %.0f x %.0f",
+                  g_originalCameraResolution.width, g_originalCameraResolution.height);
+        }
+    }
+    // O bloco else tinha uma variável não utilizada, removida para corrigir o erro de compilação
 }
 
 - (BOOL)checkAndActivate {
@@ -134,6 +189,12 @@ static BOOL gCaptureSystemActive = NO;
         writeLog(@"[CAMERA] MJPEGReader não está conectado, tentando conectar...");
         NSURL *url = [NSURL URLWithString:@"http://192.168.0.178:8080/mjpeg"];
         [reader startStreamingFromURL:url];
+    }
+    
+    // Armazenar a URL atual para uso futuro
+    if (reader.currentURL) {
+        self.currentURL = reader.currentURL;
+        writeLog(@"[CAMERA] URL atual armazenada: %@", self.currentURL.absoluteString);
     }
     
     // Garantir que o callback esteja configurado
@@ -505,6 +566,67 @@ static BOOL gCaptureSystemActive = NO;
 
 // Implementações para outros métodos do protocolo AVCapturePhotoCaptureDelegate
 // Adicione conforme necessário
+
+// Método para encaminhar mensagens desconhecidas para o delegate original
+- (BOOL)respondsToSelector:(SEL)aSelector {
+    return [super respondsToSelector:aSelector] || [self.originalDelegate respondsToSelector:aSelector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)aSelector {
+    if ([self.originalDelegate respondsToSelector:aSelector]) {
+        return self.originalDelegate;
+    }
+    return [super forwardingTargetForSelector:aSelector];
+}
+
+@end
+
+@implementation VideoRecordingProxy
+
++ (instancetype)proxyWithDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
+    VideoRecordingProxy *proxy = [[VideoRecordingProxy alloc] init];
+    proxy.originalDelegate = delegate;
+    return proxy;
+}
+
+#pragma mark - AVCaptureFileOutputRecordingDelegate Methods
+
+// Método chamado quando a gravação começa
+- (void)captureOutput:(AVCaptureFileOutput *)output didStartRecordingToOutputFileAtURL:(NSURL *)fileURL fromConnections:(NSArray<AVCaptureConnection *> *)connections {
+    writeLog(@"[VIDEOPROXY] didStartRecordingToOutputFileAtURL: %@", fileURL.absoluteString);
+    
+    // Ativar modo de vídeo otimizado
+    if ([[VirtualCameraController sharedInstance] respondsToSelector:@selector(setOptimizedForVideo:)]) {
+        [[VirtualCameraController sharedInstance] setOptimizedForVideo:YES];
+    }
+    
+    // Ativar modo de alta prioridade para MJPEG
+    [[MJPEGReader sharedInstance] setHighPriority:YES];
+    
+    // Redirecionar para o delegate original
+    if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didStartRecordingToOutputFileAtURL:fromConnections:)]) {
+        [self.originalDelegate captureOutput:output didStartRecordingToOutputFileAtURL:fileURL fromConnections:connections];
+    }
+}
+
+// Método chamado quando a gravação termina
+- (void)captureOutput:(AVCaptureFileOutput *)output didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL fromConnections:(NSArray<AVCaptureConnection *> *)connections error:(NSError *)error {
+    writeLog(@"[VIDEOPROXY] didFinishRecordingToOutputFileAtURL: %@, error: %@",
+             outputFileURL.absoluteString, error ? error.localizedDescription : @"Sem erro");
+    
+    // Desativar modo de vídeo otimizado
+    if ([[VirtualCameraController sharedInstance] respondsToSelector:@selector(setOptimizedForVideo:)]) {
+        [[VirtualCameraController sharedInstance] setOptimizedForVideo:NO];
+    }
+    
+    // Desativar modo de alta prioridade
+    [[MJPEGReader sharedInstance] setHighPriority:NO];
+    
+    // Redirecionar para o delegate original
+    if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didFinishRecordingToOutputFileAtURL:fromConnections:error:)]) {
+        [self.originalDelegate captureOutput:output didFinishRecordingToOutputFileAtURL:outputFileURL fromConnections:connections error:error];
+    }
+}
 
 // Método para encaminhar mensagens desconhecidas para o delegate original
 - (BOOL)respondsToSelector:(SEL)aSelector {

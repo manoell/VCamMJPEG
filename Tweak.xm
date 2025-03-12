@@ -9,6 +9,7 @@ NSString *g_tempFile = @"/tmp/vcam.mjpeg";
 BOOL g_isVideoOrientationSet = NO;
 int g_videoOrientation = 1; // Default orientation (portrait)
 BOOL g_isCapturingPhoto = NO; // Flag para indicar captura de foto em andamento
+BOOL g_isRecordingVideo = NO; // Flag para indicar gravação de vídeo em andamento
 CGSize g_originalCameraResolution = CGSizeZero;
 CGSize g_originalFrontCameraResolution = CGSizeZero;
 CGSize g_originalBackCameraResolution = CGSizeZero;
@@ -37,12 +38,12 @@ void logDelegates() {
 
 // Função para detectar dimensões das câmeras
 void detectCameraResolutions() {
-    // Resolução padrão caso falhe a detecção automática
-    g_originalFrontCameraResolution = CGSizeMake(960, 1280); // iPhone 7/8 Front
-    g_originalBackCameraResolution = CGSizeMake(1080, 1920); // iPhone 7/8 Back
+    // Configurar resoluções da câmera baseadas no diagnóstico
+    g_originalFrontCameraResolution = CGSizeMake(1334, 750); // Baseado no diagnóstico
+    g_originalBackCameraResolution = CGSizeMake(4032, 3024); // Baseado no diagnóstico
     
     // A detecção real ocorre via hooks em AVCaptureDevice em CameraHooks.xm
-    writeLog(@"[INIT] Configurando resoluções de câmera padrão: Front %@, Back %@",
+    writeLog(@"[INIT] Configurando resoluções de câmera: Front %@, Back %@",
              NSStringFromCGSize(g_originalFrontCameraResolution),
              NSStringFromCGSize(g_originalBackCameraResolution));
 }
@@ -68,7 +69,7 @@ void detectCameraResolutions() {
              [processName isEqualToString:@"Telegram"] ||
              [processName isEqualToString:@"Facetime"] ||
              [processName containsString:@"facetime"] ||
-             [processName isEqualToString:@"MobileSlideShow"]); // Adicionar app de fotos
+             [processName isEqualToString:@"MobileSlideShow"]); // App de fotos
             
         if (isCameraApp) {
             writeLog(@"[INIT] Configurando hooks para app de câmera: %@", processName);

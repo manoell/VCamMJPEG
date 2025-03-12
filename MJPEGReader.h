@@ -2,6 +2,13 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 
+// Definir modos de processamento
+typedef NS_ENUM(NSInteger, MJPEGReaderProcessingMode) {
+    MJPEGReaderProcessingModeDefault = 0,           // Modo padrão
+    MJPEGReaderProcessingModeHighPerformance = 1,   // Alta performance - otimizado para vídeo
+    MJPEGReaderProcessingModeHighQuality = 2        // Alta qualidade - otimizado para fotos
+};
+
 // Leitor de MJPEG
 @interface MJPEGReader : NSObject <NSURLSessionDataDelegate>
 
@@ -15,12 +22,13 @@
 @property (nonatomic, assign) CGSize lastKnownResolution;
 @property (nonatomic, strong) NSURL *currentURL;
 @property (nonatomic, assign) CMSampleBufferRef lastReceivedSampleBuffer;
-@property (nonatomic, assign) BOOL highPriorityMode; // Nova propriedade para modo de alta prioridade
+@property (nonatomic, assign) BOOL highPriorityMode; // Propriedade para modo de alta prioridade
+@property (nonatomic, assign) MJPEGReaderProcessingMode processingMode; // Novo: modo de processamento
 
 + (instancetype)sharedInstance;
 - (void)startStreamingFromURL:(NSURL *)url;
 - (void)stopStreaming;
 - (CMSampleBufferRef)createSampleBufferFromJPEGData:(NSData *)jpegData withSize:(CGSize)size;
-- (void)setHighPriority:(BOOL)enabled; // Novo método para configurar prioridade
+- (void)setHighPriority:(BOOL)enabled; // Método para configurar prioridade
 
 @end

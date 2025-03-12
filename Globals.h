@@ -20,6 +20,7 @@ extern CGSize g_originalCameraResolution;
 extern CGSize g_originalFrontCameraResolution;
 extern CGSize g_originalBackCameraResolution;
 extern BOOL g_usingFrontCamera;
+extern BOOL g_isRecordingVideo; // Nova - Indica se estamos gravando vídeo
 
 // Função para registro de delegados ativos
 void logDelegates(void);

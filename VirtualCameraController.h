@@ -10,6 +10,9 @@
 @property (nonatomic, assign) BOOL isActive;
 @property (nonatomic, assign) BOOL debugMode;
 @property (nonatomic, assign) BOOL preferDisplayLayerInjection; // Propriedade para preferir injeção via DisplayLayer
+@property (nonatomic, assign) BOOL isRecordingVideo; // Nova propriedade para rastrear gravação de vídeo
+@property (nonatomic, assign) BOOL optimizedForVideo; // Nova propriedade para modo de vídeo
+@property (nonatomic, strong) NSURL *currentURL; // Armazenar URL atual para reconexão
 
 + (instancetype)sharedInstance;
 - (BOOL)checkAndActivate;
@@ -19,6 +22,7 @@
 - (CMSampleBufferRef)getLatestSampleBufferForSubstitution;
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer;
 - (void)setPreferDisplayLayerInjection:(BOOL)prefer; // Método para configurar preferência
+- (void)setOptimizedForVideo:(BOOL)optimized; // Novo método para otimização de vídeo
 
 @end
 
@@ -31,4 +35,10 @@
 @interface AVCapturePhotoProxy : NSObject <AVCapturePhotoCaptureDelegate>
 @property (nonatomic, strong) id<AVCapturePhotoCaptureDelegate> originalDelegate;
 + (instancetype)proxyWithDelegate:(id<AVCapturePhotoCaptureDelegate>)delegate;
+@end
+
+// Adicionado - Proxy para gravação de vídeo
+@interface VideoRecordingProxy : NSObject <AVCaptureFileOutputRecordingDelegate>
+@property (nonatomic, strong) id<AVCaptureFileOutputRecordingDelegate> originalDelegate;
++ (instancetype)proxyWithDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate;
 @end
