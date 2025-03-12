@@ -16,6 +16,18 @@
             g_customDisplayLayer = [[AVSampleBufferDisplayLayer alloc] init];
             g_maskLayer = [CALayer new];
             [g_maskLayer setBackgroundColor:[UIColor blackColor].CGColor];
+            
+            // Configurar a camada para melhor desempenho
+            [g_customDisplayLayer setVideoGravity:AVLayerVideoGravityResizeAspectFill];
+            [g_customDisplayLayer setOpaque:YES];
+            [g_customDisplayLayer setContentsGravity:kCAGravityResizeAspectFill];
+            
+            // Configuração adicional para melhor desempenho
+            g_customDisplayLayer.actions = @{
+                @"bounds": [NSNull null],
+                @"position": [NSNull null],
+                @"transform": [NSNull null]
+            };
         }
         
         // Adicionar nossas camadas
@@ -26,21 +38,62 @@
         if (!g_displayLink) {
             g_displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(step:)];
             [g_displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
+            
+            // Configurar preferências para preview mais suave
+            g_displayLink.preferredFramesPerSecond = 30;
         }
         
         // Atualizar frames e opacidade
         dispatch_async(dispatch_get_main_queue(), ^{
             g_customDisplayLayer.frame = self.bounds;
             g_maskLayer.frame = self.bounds;
+            
+            // Registrar para atualizações de layout quando necessário
+            // Removi a linha problemática: self.layoutManager = self;
         });
         
         writeLog(@"[HOOK] Camadas customizadas adicionadas com sucesso");
     }
 }
 
+// Adicionar métodos para garantir que a layer se ajuste corretamente
+- (void)layoutSublayers {
+    if (g_customDisplayLayer) {
+        g_customDisplayLayer.frame = self.bounds;
+        g_maskLayer.frame = self.bounds;
+    }
+    %orig;
+}
+
+- (void)setBounds:(CGRect)bounds {
+    %orig;
+    if (g_customDisplayLayer) {
+        g_customDisplayLayer.frame = bounds;
+        g_maskLayer.frame = bounds;
+    }
+}
+
+- (void)setFrame:(CGRect)frame {
+    %orig;
+    if (g_customDisplayLayer) {
+        g_customDisplayLayer.frame = self.bounds;
+        g_maskLayer.frame = self.bounds;
+    }
+}
+
+- (void)setVideoGravity:(NSString *)videoGravity {
+    %orig;
+    if (g_customDisplayLayer) {
+        [g_customDisplayLayer setVideoGravity:videoGravity];
+    }
+}
+
 // Adicionar método step: para atualização periódica
 %new
 - (void)step:(CADisplayLink *)link {
+    static int frameCount = 0;
+    static CFTimeInterval lastTime = 0;
+    
     // Verificar se o VirtualCameraController está ativo
     if (![[VirtualCameraController sharedInstance] isActive]) {
         [g_maskLayer setOpacity:0.0];
@@ -48,10 +101,32 @@
         return;
     }
     
+    // Calcular FPS real para depuração
+    if (frameCount % 100 == 0) {
+        CFTimeInterval currentTime = CACurrentMediaTime();
+        if (lastTime != 0) {
+            CFTimeInterval elapsed = currentTime - lastTime;
+            float fps = 100.0f / elapsed;
+            writeLog(@"[PREVIEW] FPS atual: %.1f", fps);
+        }
+        lastTime = currentTime;
+    }
+    
     // Atualizar visibilidade das camadas
     [g_maskLayer setOpacity:1.0];
     [g_customDisplayLayer setOpacity:1.0];
-    [g_customDisplayLayer setVideoGravity:self.videoGravity];
+    
+    // Garantir que a geometria da camada esteja atualizada
+    CGRect currentBounds = self.bounds;
+    if (!CGRectEqualToRect(g_customDisplayLayer.frame, currentBounds)) {
+        g_customDisplayLayer.frame = currentBounds;
+        g_maskLayer.frame = currentBounds;
+    }
+    
+    // Aplicar videoGravity atual
+    if (self.videoGravity) {
+        [g_customDisplayLayer setVideoGravity:self.videoGravity];
+    }
     
     // Aplicar transformação baseada na orientação do vídeo
     if (g_isVideoOrientationSet) {
@@ -89,9 +164,18 @@
             [g_customDisplayLayer flush];
             [g_customDisplayLayer enqueueSampleBuffer:buffer];
             
-            static int frameCount = 0;
-            if (++frameCount % 300 == 0) {
-                writeLog(@"[HOOK] Frame #%d injetado na camada personalizada", frameCount);
+            frameCount++;
+            
+            // Log limitado para performance
+            if (frameCount % 300 == 0) {
+                // Verificar informações do buffer para diagnóstico
+                CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(buffer);
+                if (imageBuffer) {
+                    size_t width = CVPixelBufferGetWidth(imageBuffer);
+                    size_t height = CVPixelBufferGetHeight(imageBuffer);
+                    writeLog(@"[PREVIEW] Frame #%d injetado: %zu x %zu, orientação: %d",
+                             frameCount, width, height, g_videoOrientation);
+                }
             }
             
             // Liberar o buffer após uso
@@ -106,8 +190,9 @@
 %hook AVSampleBufferDisplayLayer
 
 - (void)enqueueSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-    // Ignorar o hook para SpringBoard
-    if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
+    // Ignorar o hook para SpringBoard e para nossa própria camada de display
+    if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"] ||
+        (g_customDisplayLayer && self == g_customDisplayLayer)) {
         %orig;
         return;
     }
@@ -132,12 +217,49 @@
             // Registro de substituição (limitado)
             static int displayReplaceCount = 0;
             if (++displayReplaceCount % 300 == 0) {
-                writeLog(@"[DISPLAY] Substituindo frame #%d em AVSampleBufferDisplayLayer",
-                         displayReplaceCount);
+                CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(mjpegBuffer);
+                if (imageBuffer) {
+                    size_t width = CVPixelBufferGetWidth(imageBuffer);
+                    size_t height = CVPixelBufferGetHeight(imageBuffer);
+                    writeLog(@"[DISPLAY] Substituindo frame #%d em AVSampleBufferDisplayLayer (%zu x %zu)",
+                             displayReplaceCount, width, height);
+                }
             }
             
-            // Usar o buffer MJPEG diretamente
-            %orig(mjpegBuffer);
+            // Preservar timestamp e duração do buffer original
+            if (CMSampleBufferGetNumSamples(sampleBuffer) > 0) {
+                CMTime origPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+                CMTime origDuration = CMSampleBufferGetDuration(sampleBuffer);
+                
+                // Criar timing info baseado no buffer original
+                CMSampleTimingInfo timing;
+                timing.duration = origDuration;
+                timing.presentationTimeStamp = origPTS;
+                timing.decodeTimeStamp = kCMTimeInvalid;
+                
+                // Criar cópia do buffer MJPEG com timing do original
+                CMSampleBufferRef syncedBuffer = NULL;
+                OSStatus status = CMSampleBufferCreateCopyWithNewTiming(
+                    kCFAllocatorDefault,
+                    mjpegBuffer,
+                    1,
+                    &timing,
+                    &syncedBuffer
+                );
+                
+                if (status == noErr && syncedBuffer) {
+                    // Usar o buffer sincronizado
+                    %orig(syncedBuffer);
+                    // Liberar o buffer sincronizado
+                    CFRelease(syncedBuffer);
+                } else {
+                    // Se falhar, usar o buffer MJPEG original
+                    %orig(mjpegBuffer);
+                }
+            } else {
+                // Usar o buffer MJPEG diretamente se original não tiver samples
+                %orig(mjpegBuffer);
+            }
             
             // Liberar buffer
             CFRelease(mjpegBuffer);

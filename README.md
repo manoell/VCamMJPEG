@@ -14,8 +14,8 @@ VCamMJPEG é um tweak para iOS jailbroken que permite substituir o feed da câme
 ### Recepção de Streaming MJPEG
 - Conexão com servidores MJPEG via HTTP
 - Processamento eficiente de frames
-- Suporte a diferentes resoluções
-- Otimizado para uso em tempo real
+- Suporte a diferentes resoluções (otimizado para 1920x1080)
+- Alta performance com até 30fps
 
 ### Substituição da Câmera Nativa
 - Injeção de camada visual personalizada
@@ -61,69 +61,92 @@ O VCamMJPEG utiliza uma abordagem multicamada para a substituição da câmera:
 5. **Adaptação de Formato**: Redimensiona automaticamente para combinar com a câmera real
 6. **Preservação de Metadados**: Mantém informações essenciais como orientação e timestamps
 
-## Estado Atual de Desenvolvimento
-
-- ✅ Recepção e processamento de streams MJPEG
-- ✅ Interface de preview com opção de ativar/desativar
-- ✅ Substituição do feed de visualização da câmera
-- ✅ Substituição durante captura de fotos
-- 🔄 Preservação de resolução e metadados
-- 🔄 Substituição de miniaturas (thumbnails)
-- 🔄 Compatibilidade com câmeras frontal/traseira
-- 🔄 Suporte completo a vídeos
-- 🔄 Configurações avançadas de qualidade e performance
-
 ## Como Usar
 
-1. Configure um servidor MJPEG na sua rede local
-   - Use o servidor Node.js incluído ou outro software compatível
+### Configuração do Servidor MJPEG
 
-2. Instale o tweak no seu dispositivo com jailbreak
-3. Abra a interface do tweak no SpringBoard
-4. Digite o endereço do servidor MJPEG (ex: `192.168.0.178:8080/mjpeg`)
-5. Clique em "Conectar" para iniciar a captura
-6. Você pode ativar/desativar o preview conforme necessário
-7. Abra qualquer aplicativo que use a câmera para ver a substituição em ação
-8. Tire fotos normalmente - elas serão capturadas do stream MJPEG
+1. Configure o servidor Node.js incluído:
+   ```bash
+   # Instale as dependências
+   npm install chalk@4.1.2
+   
+   # Execute o servidor
+   node server.js
+   ```
 
-## Servidor MJPEG Incluído
+2. Selecione o **ManyCam Virtual Webcam** quando solicitado no terminal
 
-O projeto inclui um servidor MJPEG básico escrito em Node.js que pode ser configurado para:
+### Configuração do ManyCam
 
-- Capturar de webcams conectadas ao computador
-- Transmitir em formato MJPEG compatível com iOS
-- Configurar qualidade e resolução do stream
+1. Configure a saída do ManyCam:
+   - Resolução: 1920x1080 (Full HD)
+   - Taxa de frames: 30fps
+   - Formato: MJPEG
+   - Qualidade: 90%
+
+2. Defina sua fonte (webcam, vídeo, imagem, etc.)
+
+### No Dispositivo iOS
+
+1. Instale o tweak no seu dispositivo com jailbreak
+2. Abra a interface do tweak no SpringBoard
+3. Digite o endereço do servidor MJPEG (ex: `http://192.168.0.178:8080/mjpeg`)
+4. Clique em "Conectar" para iniciar a captura
+5. Você pode ativar/desativar o preview conforme necessário
+6. Abra qualquer aplicativo que use a câmera para ver a substituição em ação
+7. Tire fotos normalmente - elas serão capturadas do stream MJPEG
+
+## Otimizações de Performance
+
+Para obter o melhor desempenho:
+
+- Use uma conexão Wi-Fi de 5GHz entre o dispositivo iOS e o servidor
+- Mantenha o ManyCam e o servidor MJPEG no mesmo computador
+- Desative o preview na interface quando não for necessário
+- Em caso de problemas de performance, reduza a resolução para 1280x720
+
+## Solução de Problemas
+
+Se você encontrar problemas:
+
+1. **Conexão**:
+   - Verifique se o dispositivo iOS e o servidor estão na mesma rede
+   - Confirme se nenhum firewall está bloqueando a porta 8080
+   - Teste o stream MJPEG em um navegador: `http://seu-ip:8080/mjpeg`
+
+2. **Performance**:
+   - Reduza a resolução para 1280x720
+   - Diminua a qualidade JPEG para 80%
+   - Desative o preview na interface
+
+3. **Compatibilidade**:
+   - Em caso de problemas com apps específicos, reinicie o tweak e o aplicativo
+   - Alguns aplicativos podem exigir reinicialização para reconhecer o stream
 
 ## Requisitos
 
 - iOS 14.0 até 16.7.10
 - Dispositivo com jailbreak
 - Servidor MJPEG na rede local
-
-## Problemas Conhecidos
-
-- Algumas operações de processamento de vídeo avançadas ainda não são suportadas
-- Pode ocorrer consumo elevado de bateria devido ao processamento contínuo
-- A orientação do vídeo pode precisar de ajustes em algumas situações
-
-## Próximos Passos
-
-- Melhorar a detecção e uso de câmeras frontal/traseira
-- Aprimorar o suporte a diferentes resoluções
-- Adicionar suporte para Live Photos
-- Implementar controles de qualidade e performance
-- Otimizar o uso de bateria
-- Melhorar a compatibilidade com diversos aplicativos
+- PC com ManyCam ou software similar
 
 ## Compatibilidade
 
-- iOS 14.1 (iPhone 7) atualmente
-- iOS 15.8.3 (iPhone 7) falta testar
-- iOS 16.7.10 (iPhone 8) falta testar
+- iOS 14.x: Testado e funcionando (iPhone 7)
+- iOS 15.x: Falta testar (iPhone 7)
+- iOS 16.x: Falta testar (iPhone 8)
+
+## Próximos Passos
+
+- Implementação completa de redimensionamento automático
+- Melhorias na detecção de orientação
+- Otimizações de performance para streaming em alta resolução
+- Suporte para Live Photos
+- Interface de configuração avançada
 
 ## Créditos
 
-Este projeto foi desenvolvido combinando técnicas de diferentes fontes para criar uma solução robusta de substituição de câmera via MJPEG.
+Este projeto foi desenvolvido utilizando técnicas avançadas de hooking do sistema de câmera iOS e processamento de stream MJPEG.
 
 ## Licença
 

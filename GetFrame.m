@@ -1,5 +1,6 @@
 #import "GetFrame.h"
 #import "logger.h"
+#import "Globals.h"
 
 // Variáveis globais para gerenciamento do buffer de frame atual
 static CMSampleBufferRef g_lastReceivedBuffer = NULL;
@@ -7,6 +8,12 @@ static BOOL g_isFrameReady = NO;
 
 // Mutex para acesso thread-safe às variáveis compartilhadas
 static NSLock *bufferLock = nil;
+
+// Variáveis para armazenar informações sobre o último frame processado
+static size_t g_lastFrameWidth = 0;
+static size_t g_lastFrameHeight = 0;
+static int g_successfulReplacements = 0;
+static int g_failedReplacements = 0;
 
 @implementation GetFrame
 
@@ -35,8 +42,9 @@ static NSLock *bufferLock = nil;
     static int callCount = 0;
     
     // Log limitado
-    if (++callCount % 200 == 0) {
-        writeLog(@"[GETFRAME] getCurrentFrame chamado %d vezes", callCount);
+    if (++callCount % 500 == 0) {
+        writeLog(@"[GETFRAME] getCurrentFrame chamado %d vezes (sucesso: %d, falhas: %d)",
+                callCount, g_successfulReplacements, g_failedReplacements);
     }
     
     // Obter acesso exclusivo ao buffer compartilhado
@@ -50,8 +58,13 @@ static NSLock *bufferLock = nil;
             OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, g_lastReceivedBuffer, &resultBuffer);
             
             if (status == noErr && resultBuffer != NULL) {
-                if (callCount % 300 == 0) {
-                    writeLog(@"[GETFRAME] Retornando buffer MJPEG válido para substituição");
+                if (callCount % 500 == 0) {
+                    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(resultBuffer);
+                    if (imageBuffer) {
+                        size_t width = CVPixelBufferGetWidth(imageBuffer);
+                        size_t height = CVPixelBufferGetHeight(imageBuffer);
+                        writeLog(@"[GETFRAME] Retornando buffer MJPEG válido: %zu x %zu", width, height);
+                    }
                 }
                 
                 // Se o inputBuffer for válido, precisamos copiar propriedades importantes
@@ -88,6 +101,13 @@ static NSLock *bufferLock = nil;
                                       (__bridge CFTypeRef)@(CMTimeGetSeconds(presentationTime)),
                                       kCMAttachmentMode_ShouldPropagate);
                         
+                        // Verificar orientação no buffer original
+                        CFTypeRef orientationAttachment = CMGetAttachment(inputBuffer, CFSTR("VideoOrientation"), NULL);
+                        if (orientationAttachment) {
+                            CMSetAttachment(resultBuffer, CFSTR("VideoOrientation"),
+                                           orientationAttachment, kCMAttachmentMode_ShouldPropagate);
+                        }
+                        
                         // Transferir outros metadados importantes se existirem
                         CFTypeRef exifData = CMGetAttachment(inputBuffer, CFSTR("{Exif}"), NULL);
                         if (exifData) {
@@ -103,6 +123,9 @@ static NSLock *bufferLock = nil;
                     }
                 }
                 
+                // Incrementar contador de substituições bem-sucedidas
+                g_successfulReplacements++;
+                
                 // O chamador deve liberar este buffer quando terminar
                 [bufferLock unlock];
                 return resultBuffer;
@@ -114,8 +137,11 @@ static NSLock *bufferLock = nil;
     
     [bufferLock unlock];
     
+    // Incrementar contador de falhas
+    g_failedReplacements++;
+    
     // Se chegamos aqui, não temos um buffer válido para substituição
-    if (callCount % 300 == 0) {
+    if (callCount % 500 == 0) {
         writeLog(@"[GETFRAME] Nenhum buffer disponível para substituição");
     }
     
@@ -131,8 +157,34 @@ static NSLock *bufferLock = nil;
         if (g_lastReceivedBuffer != NULL && CMSampleBufferIsValid(g_lastReceivedBuffer)) {
             CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(g_lastReceivedBuffer);
             if (imageBuffer) {
+                // Bloquear buffer para leitura segura
+                CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+                
+                // Criar CIImage e depois UIImage
                 CIImage *ciImage = [CIImage imageWithCVPixelBuffer:imageBuffer];
-                image = [UIImage imageWithCIImage:ciImage];
+                if (ciImage) {
+                    CIContext *context = [CIContext contextWithOptions:nil];
+                    CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+                    
+                    if (cgImage) {
+                        // Definir orientação baseada na orientação global
+                        UIImageOrientation orientation = UIImageOrientationUp;
+                        if (g_isVideoOrientationSet) {
+                            switch (g_videoOrientation) {
+                                case 1: orientation = UIImageOrientationUp; break;
+                                case 2: orientation = UIImageOrientationDown; break;
+                                case 3: orientation = UIImageOrientationLeft; break;
+                                case 4: orientation = UIImageOrientationRight; break;
+                            }
+                        }
+                        
+                        image = [UIImage imageWithCGImage:cgImage scale:1.0 orientation:orientation];
+                        CGImageRelease(cgImage);
+                    }
+                }
+                
+                // Desbloquear buffer
+                CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
             }
         }
     } @catch (NSException *e) {
@@ -156,6 +208,42 @@ static NSLock *bufferLock = nil;
         return;
     }
     
+    // Verificar a resolução do frame MJPEG
+    size_t width = CVPixelBufferGetWidth(imageBuffer);
+    size_t height = CVPixelBufferGetHeight(imageBuffer);
+    
+    // Verificar se precisamos adaptar a resolução para corresponder à câmera do dispositivo
+    // Removido: BOOL needsResizing = NO;
+    
+    if (!CGSizeEqualToSize(g_originalCameraResolution, CGSizeZero)) {
+        // Verificar proporção do frame MJPEG vs câmera real
+        CGFloat mjpegRatio = (CGFloat)width / (CGFloat)height;
+        CGFloat cameraRatio = g_originalCameraResolution.width / g_originalCameraResolution.height;
+        
+        // Se a diferença de proporção for significativa
+        if (fabs(mjpegRatio - cameraRatio) > 0.05) {
+            static BOOL loggedAspectWarning = NO;
+            if (!loggedAspectWarning) {
+                writeLog(@"[GETFRAME] Aviso: Proporção de aspecto do MJPEG (%.2f) difere da câmera (%.2f)",
+                        mjpegRatio, cameraRatio);
+                loggedAspectWarning = YES;
+            }
+        }
+        
+        // Se as dimensões forem muito diferentes da câmera real, redimensionar pode ser necessário
+        // Esta verificação é opcional - pode ser desativada se causar problemas de desempenho
+        if (width != g_originalCameraResolution.width || height != g_originalCameraResolution.height) {
+            // Por enquanto, apenas logamos - implementação real de redimensionamento seria aqui
+            if (g_lastFrameWidth != width || g_lastFrameHeight != height) {
+                writeLog(@"[GETFRAME] Dimensões do frame MJPEG: %zu x %zu, câmera real: %.0f x %.0f",
+                        width, height, g_originalCameraResolution.width, g_originalCameraResolution.height);
+                
+                g_lastFrameWidth = width;
+                g_lastFrameHeight = height;
+            }
+        }
+    }
+    
     [bufferLock lock];
     @try {
         // Liberar o buffer anterior
@@ -171,13 +259,9 @@ static NSLock *bufferLock = nil;
             g_isFrameReady = YES;
             
             static int frameCount = 0;
-            if (++frameCount % 300 == 0) {
-                writeLog(@"[GETFRAME] Novo frame MJPEG #%d processado e pronto para substituição", frameCount);
-                
-                // Log de dimensões
-                size_t width = CVPixelBufferGetWidth(imageBuffer);
-                size_t height = CVPixelBufferGetHeight(imageBuffer);
-                writeLog(@"[GETFRAME] Dimensões do frame: %zu x %zu", width, height);
+            if (++frameCount % 500 == 0) {
+                writeLog(@"[GETFRAME] Novo frame MJPEG #%d processado: %zu x %zu",
+                        frameCount, width, height);
             }
         } else {
             writeLog(@"[GETFRAME] Erro ao copiar sample buffer: %d", (int)status);
@@ -260,6 +344,9 @@ static NSLock *bufferLock = nil;
     
     // Limpar o contexto para evitar artefatos
     CGContextClearRect(context, CGRectMake(0, 0, size.width, size.height));
+    
+    // Configurar alta qualidade de interpolação
+    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
     
     // Desenhar a imagem no contexto com a orientação correta
     CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), cgImage);

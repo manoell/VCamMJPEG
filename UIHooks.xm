@@ -3,6 +3,17 @@
 // Grupo para hooks relacionados a UI e imagens
 %group UIHooks
 
+// Mapeamento consistente da orientação de vídeo para UIImageOrientation
+static UIImageOrientation getOrientationFromVideoOrientation(int videoOrientation) {
+    switch (videoOrientation) {
+        case 1: return UIImageOrientationUp;    // Portrait
+        case 2: return UIImageOrientationDown;  // Portrait upside down
+        case 3: return UIImageOrientationLeft;  // Landscape Right -> Left (invertido na lógica UIImage)
+        case 4: return UIImageOrientationRight; // Landscape Left -> Right (invertido na lógica UIImage)
+        default: return UIImageOrientationUp;   // Default to portrait
+    }
+}
+
 // Hook para UIImage para interceptar a geração de miniaturas
 %hook UIImage
 
@@ -13,54 +24,51 @@
         return %orig;
     }
     
+    static int replacementCount = 0;
+    if (++replacementCount % 100 == 0) {
+        writeLog(@"[HOOK] imageWithCGImage:scale:orientation: chamado #%d", replacementCount);
+    }
+    
     // Verificar se temos um buffer válido
     CMSampleBufferRef buffer = [GetFrame getCurrentFrame:nil replace:YES];
     if (buffer && CMSampleBufferIsValid(buffer)) {
         CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(buffer);
         if (imageBuffer) {
+            // Bloquear para acesso seguro
+            CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+            
             // Criar uma imagem do nosso buffer MJPEG para a miniatura
             CIImage *ciImage = [CIImage imageWithCVPixelBuffer:imageBuffer];
+            
+            // Desbloquear após uso
+            CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+            
             if (ciImage) {
                 CIContext *context = [CIContext contextWithOptions:nil];
                 CGImageRef mjpegImage = [context createCGImage:ciImage fromRect:ciImage.extent];
                 
                 if (mjpegImage) {
                     // SOLUÇÃO CRÍTICA: Forçar orientação correta com base em g_videoOrientation
-                    UIImageOrientation forceOrientation;
+                    UIImageOrientation forceOrientation = orientation;
                     
                     if (g_isVideoOrientationSet) {
-                        switch (g_videoOrientation) {
-                            case 1: // Portrait
-                                forceOrientation = UIImageOrientationUp;
-                                break;
-                            case 2: // Portrait upside down
-                                forceOrientation = UIImageOrientationDown;
-                                break;
-                            case 3: // Landscape right - este é o problema
-                                forceOrientation = UIImageOrientationLeft;  // IMPORTANTE: Use LEFT para Landscape RIGHT
-                                break;
-                            case 4: // Landscape left
-                                forceOrientation = UIImageOrientationRight;  // IMPORTANTE: Use RIGHT para Landscape LEFT
-                                break;
-                            default:
-                                forceOrientation = orientation;
-                                break;
-                        }
+                        forceOrientation = getOrientationFromVideoOrientation(g_videoOrientation);
                         
                         writeLog(@"[HOOK] FORÇANDO orientação %d para %d com base em videoOrientation %d",
                                (int)orientation, (int)forceOrientation, g_videoOrientation);
-                        
-                        // Usar a imagem MJPEG em vez da original com a orientação forçada
-                        UIImage *result = %orig(mjpegImage, scale, forceOrientation);
-                        CGImageRelease(mjpegImage);
-                        return result;
-                    } else {
-                        // Se não temos orientação definida, usar a orientação original
-                        writeLog(@"[HOOK] Substituindo miniatura com imagem MJPEG (orientação original: %d)", (int)orientation);
-                        UIImage *result = %orig(mjpegImage, scale, orientation);
-                        CGImageRelease(mjpegImage);
-                        return result;
                     }
+                    
+                    // Usar a imagem MJPEG em vez da original com a orientação forçada
+                    UIImage *result = %orig(mjpegImage, scale, forceOrientation);
+                    CGImageRelease(mjpegImage);
+                    
+                    if (replacementCount % 100 == 0) {
+                        // Log limitado para não afetar performance
+                        writeLog(@"[HOOK] Substituindo imagem para miniatura (orientação: %d, escala: %.1f)",
+                               (int)forceOrientation, scale);
+                    }
+                    
+                    return result;
                 }
             }
         }
@@ -90,8 +98,15 @@
             if (buffer && CMSampleBufferIsValid(buffer)) {
                 CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(buffer);
                 if (imageBuffer) {
+                    // Bloquear buffer
+                    CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+                    
                     // Criar uma imagem do nosso buffer MJPEG
                     CIImage *ciImage = [CIImage imageWithCVPixelBuffer:imageBuffer];
+                    
+                    // Desbloquear buffer
+                    CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+                    
                     if (ciImage) {
                         CIContext *context = [CIContext contextWithOptions:nil];
                         CGImageRef mjpegImage = [context createCGImage:ciImage fromRect:ciImage.extent];
@@ -100,20 +115,7 @@
                             // Determinar a orientação correta baseada no estado da câmera
                             UIImageOrientation orientation = UIImageOrientationUp;
                             if (g_isVideoOrientationSet) {
-                                switch (g_videoOrientation) {
-                                    case 1: // Portrait
-                                        orientation = UIImageOrientationUp;
-                                        break;
-                                    case 2: // Portrait upside down
-                                        orientation = UIImageOrientationDown;
-                                        break;
-                                    case 3: // Landscape right
-                                        orientation = UIImageOrientationLeft; // Corrigido
-                                        break;
-                                    case 4: // Landscape left
-                                        orientation = UIImageOrientationRight; // Corrigido
-                                        break;
-                                }
+                                orientation = getOrientationFromVideoOrientation(g_videoOrientation);
                             }
                             
                             // Criar UIImage a partir da nossa imagem com orientação correta
@@ -139,6 +141,32 @@
 // Hook para UIImageView para garantir que as miniaturas sejam exibidas corretamente
 %hook UIImageView
 
+// Método para atualizar a posição e dimensões da imagem conforme necessário
+- (void)setFrame:(CGRect)frame {
+    %orig;
+    
+    // Se não estamos capturando foto ou a substituição não está ativa, seguir normalmente
+    if (!g_isCapturingPhoto || ![[VirtualCameraController sharedInstance] isActive]) {
+        return;
+    }
+    
+    // Verificar proporção da imagem atual se disponível
+    if (self.image) {
+        CGSize imageSize = self.image.size;
+        CGFloat imageRatio = imageSize.width / imageSize.height;
+        
+        // Verificar proporção do frame
+        CGFloat frameRatio = frame.size.width / frame.size.height;
+        
+        // Se a diferença de proporção for significativa, pode ser necessário ajustar o contentMode
+        if (fabs(imageRatio - frameRatio) > 0.1) {
+            // Priorizar preenchimento para evitar espaços vazios
+            self.contentMode = UIViewContentModeScaleAspectFill;
+            self.clipsToBounds = YES;
+        }
+    }
+}
+
 - (void)setImage:(UIImage *)image {
     // Se não estamos durante uma captura de foto, seguir normalmente
     if (!g_isCapturingPhoto || ![[VirtualCameraController sharedInstance] isActive]) {
@@ -156,7 +184,8 @@
         
         if ([className containsString:@"Thumbnail"] ||
             [className containsString:@"Preview"] ||
-            [className containsString:@"Camera"]) {
+            [className containsString:@"Camera"] ||
+            [className containsString:@"Photo"]) {
             mightBeThumbnail = YES;
             break;
         }
@@ -166,15 +195,25 @@
 
     // Se parece ser uma miniatura e estamos capturando, tentar substituir
     if (mightBeThumbnail) {
-        writeLog(@"[HOOK] Detectada possível imageView de miniatura: %@", NSStringFromClass([self class]));
+        static int thumbnailCount = 0;
+        if (++thumbnailCount % 50 == 0) {
+            writeLog(@"[HOOK] Detectada possível imageView de miniatura: %@", NSStringFromClass([self class]));
+        }
         
         // Verificar se temos um buffer válido
         CMSampleBufferRef buffer = [GetFrame getCurrentFrame:nil replace:YES];
         if (buffer && CMSampleBufferIsValid(buffer)) {
             CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(buffer);
             if (imageBuffer) {
+                // Bloquear buffer
+                CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+                
                 // Criar uma imagem do nosso buffer MJPEG
                 CIImage *ciImage = [CIImage imageWithCVPixelBuffer:imageBuffer];
+                
+                // Desbloquear buffer
+                CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+                
                 if (ciImage) {
                     CIContext *context = [CIContext contextWithOptions:nil];
                     CGImageRef mjpegImage = [context createCGImage:ciImage fromRect:ciImage.extent];
@@ -186,40 +225,34 @@
                         // Verificar se temos uma orientação definida
                         if (g_isVideoOrientationSet) {
                             // Mapear corretamente orientação do vídeo para UIImageOrientation
-                            switch (g_videoOrientation) {
-                                case 1: // Portrait
-                                    orientation = UIImageOrientationUp;
-                                    break;
-                                case 2: // Portrait upside down
-                                    orientation = UIImageOrientationDown;
-                                    break;
-                                case 3: // Landscape right
-                                    // CORREÇÃO: Usar Left em vez de Right
-                                    orientation = UIImageOrientationLeft;
-                                    break;
-                                case 4: // Landscape left
-                                    // CORREÇÃO: Usar Right em vez de Left
-                                    orientation = UIImageOrientationRight;
-                                    break;
-                                default:
-                                    orientation = UIImageOrientationUp;
-                                    break;
-                            }
+                            orientation = getOrientationFromVideoOrientation(g_videoOrientation);
                         } else if (image) {
                             // Se não temos orientação definida mas temos imagem original, usar sua orientação
                             orientation = image.imageOrientation;
                         }
                         
-                        writeLog(@"[HOOK] Aplicando orientação %d para thumbnail baseado na orientação de vídeo %d",
-                                (int)orientation, g_videoOrientation);
+                        if (thumbnailCount % 50 == 0) {
+                            writeLog(@"[HOOK] Aplicando orientação %d para thumbnail baseado na orientação de vídeo %d",
+                                    (int)orientation, g_videoOrientation);
+                        }
+                        
+                        // Obter a escala da imagem original para manter consistência
+                        CGFloat scale = image ? image.scale : 1.0;
                         
                         // Criar UIImage com orientação correta
-                        UIImage *mjpegUIImage = [UIImage imageWithCGImage:mjpegImage scale:1.0 orientation:orientation];
+                        UIImage *mjpegUIImage = [UIImage imageWithCGImage:mjpegImage scale:scale orientation:orientation];
                         CGImageRelease(mjpegImage);
                         
                         if (mjpegUIImage) {
-                            writeLog(@"[HOOK] Substituindo imagem em UIImageView com frame MJPEG (orientação: %d)",
-                                    (int)orientation);
+                            if (thumbnailCount % 50 == 0) {
+                                writeLog(@"[HOOK] Substituindo imagem em UIImageView com frame MJPEG (orientação: %d)",
+                                        (int)orientation);
+                            }
+                            
+                            // Configurar contentMode para apresentação ideal
+                            self.contentMode = UIViewContentModeScaleAspectFill;
+                            self.clipsToBounds = YES;
+                            
                             %orig(mjpegUIImage);
                             return;
                         }

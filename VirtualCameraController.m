@@ -2,6 +2,8 @@
 #import "MJPEGReader.h"
 #import "logger.h"
 #import "GetFrame.h"
+#import "Globals.h"
+#import "MJPEGPreviewWindow.h"
 
 // Variável global para rastrear se a captura está ativa em todo o sistema
 static BOOL gCaptureSystemActive = NO;
@@ -13,9 +15,15 @@ static BOOL gCaptureSystemActive = NO;
 {
     // Usar variáveis de instância para tipos C
     dispatch_queue_t _processingQueue;
+    dispatch_queue_t _highPriorityQueue;
     
     // Contador para limitar logs
     int _frameCounter;
+    
+    // Timestamp para medição de FPS
+    CFTimeInterval _lastFrameTime;
+    int _framesThisSecond;
+    float _currentFPS;
 }
 @end
 
@@ -33,10 +41,16 @@ static BOOL gCaptureSystemActive = NO;
 - (instancetype)init {
     if (self = [super init]) {
         _processingQueue = dispatch_queue_create("com.vcam.mjpeg.virtual-camera", DISPATCH_QUEUE_SERIAL);
+        _highPriorityQueue = dispatch_queue_create("com.vcam.mjpeg.high-priority", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(_highPriorityQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
+        
         _isActive = NO;
         _debugMode = YES;
         _frameCounter = 0;
         _preferDisplayLayerInjection = YES; // Por padrão, preferir injeção via DisplayLayer
+        _lastFrameTime = 0;
+        _framesThisSecond = 0;
+        _currentFPS = 0;
         
         // Configurar callbacks apenas se não estivermos no SpringBoard
         if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
@@ -103,6 +117,12 @@ static BOOL gCaptureSystemActive = NO;
         _processingQueue = dispatch_queue_create("com.vcam.mjpeg.virtual-camera", DISPATCH_QUEUE_SERIAL);
     }
     
+    // Inicializar fila de alta prioridade
+    if (!_highPriorityQueue) {
+        _highPriorityQueue = dispatch_queue_create("com.vcam.mjpeg.high-priority", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(_highPriorityQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
+    }
+    
     // Definir como ativo globalmente
     gCaptureSystemActive = YES;
     self.isActive = YES;
@@ -124,8 +144,30 @@ static BOOL gCaptureSystemActive = NO;
         };
     }
     
-    // Configurar para alta prioridade
-    [reader setHighPriority:YES];
+    // Detectar aplicativo atual para configurações específicas
+    NSString *processName = [NSProcessInfo processInfo].processName;
+    
+    // Configurações específicas para aplicativos conhecidos
+    if ([processName isEqualToString:@"Camera"]) {
+        // App nativo de câmera - preferir DisplayLayer
+        [reader setHighPriority:YES];
+        self.preferDisplayLayerInjection = YES;
+        writeLog(@"[CAMERA] Configurações otimizadas para app de Câmera nativo");
+    } else if ([processName isEqualToString:@"Telegram"]) {
+        // Telegram - ajustes específicos
+        [reader setHighPriority:YES];
+        self.preferDisplayLayerInjection = NO; // Telegram funciona melhor com a abordagem de saída direta
+        writeLog(@"[CAMERA] Configurações otimizadas para Telegram");
+    } else if ([processName isEqualToString:@"MobileSlideShow"]) {
+        // App de Fotos
+        [reader setHighPriority:YES];
+        self.preferDisplayLayerInjection = YES;
+        writeLog(@"[CAMERA] Configurações otimizadas para app de Fotos");
+    } else {
+        // Modo padrão para outros apps
+        [reader setHighPriority:YES];
+        writeLog(@"[CAMERA] Usando configurações padrão para %@", processName);
+    }
 }
 
 - (void)stopCapturing {
@@ -177,8 +219,31 @@ static BOOL gCaptureSystemActive = NO;
             return;
         }
         
+        // Calcular FPS
+        CFTimeInterval currentTime = CACurrentMediaTime();
+        _framesThisSecond++;
+        
+        if (currentTime - _lastFrameTime >= 1.0) {
+            _currentFPS = _framesThisSecond / (currentTime - _lastFrameTime);
+            _framesThisSecond = 0;
+            _lastFrameTime = currentTime;
+            
+            if (_debugMode) {
+                writeLog(@"[CAMERA] FPS atual: %.1f", _currentFPS);
+            }
+        }
+        
         // Enviar para o GetFrame para armazenamento e uso na substituição
         [[GetFrame sharedInstance] processNewMJPEGFrame:sampleBuffer];
+        
+        // Atualizar a imagem na interface de preview, se estiver disponível e visível
+        if (![NSThread isMainThread]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self updatePreviewImage];
+            });
+        } else {
+            [self updatePreviewImage];
+        }
         
         // Log periódico
         if (_debugMode && (++_frameCounter % 300 == 0)) {
@@ -216,6 +281,22 @@ static BOOL gCaptureSystemActive = NO;
         }
     } @catch (NSException *exception) {
         writeLog(@"[CAMERA] Erro ao processar sampleBuffer: %@", exception);
+    }
+}
+
+// Método para atualizar a interface de preview
+- (void)updatePreviewImage {
+    // Verificar se a janela de preview está disponível e o preview está ativo
+    Class previewWindowClass = NSClassFromString(@"MJPEGPreviewWindow");
+    if (previewWindowClass) {
+        id previewWindow = [previewWindowClass sharedInstance];
+        if ([previewWindow respondsToSelector:@selector(updatePreviewImage:)]) {
+            // Obter a imagem para o preview
+            UIImage *previewImage = [[GetFrame sharedInstance] getDisplayImage];
+            if (previewImage) {
+                [(MJPEGPreviewWindow *)previewWindow updatePreviewImage:previewImage];
+            }
+        }
     }
 }
 
@@ -271,8 +352,34 @@ static BOOL gCaptureSystemActive = NO;
                 CFRelease(resultBuffer);
                 resultBuffer = syncedBuffer;
             }
+            
+            // Transferir metadados importantes
+            // Orientação
+            CFTypeRef orientationAttachment = CMGetAttachment(originalBuffer, CFSTR("VideoOrientation"), NULL);
+            if (orientationAttachment) {
+                CMSetAttachment(resultBuffer, CFSTR("VideoOrientation"),
+                               orientationAttachment, kCMAttachmentMode_ShouldPropagate);
+            }
+            
+            // Outros metadados comuns - Corrigido para usar @[] ao invés de CFStringRef direto
+            NSArray *metadataKeys = @[
+                (id)CFSTR("CVImageBufferYCbCrMatrix"),
+                (id)CFSTR("CVImageBufferColorPrimaries"),
+                (id)CFSTR("CVImageBufferTransferFunction"),
+                (id)CFSTR("CVFieldCount"),
+                (id)CFSTR("CVFieldDetail")
+            ];
+            
+            for (id key in metadataKeys) {
+                CFTypeRef attachment = CMGetAttachment(originalBuffer, (CFStringRef)key, NULL);
+                if (attachment) {
+                    CMSetAttachment(resultBuffer, (CFStringRef)key,
+                                  attachment, kCMAttachmentMode_ShouldPropagate);
+                }
+            }
         } @catch (NSException *e) {
             // Em caso de erro, continuar com o buffer não sincronizado
+            writeLog(@"[CAMERA] Erro ao sincronizar buffer: %@", e);
         }
     }
     
@@ -307,12 +414,65 @@ static BOOL gCaptureSystemActive = NO;
         if (mjpegBuffer && CMSampleBufferIsValid(mjpegBuffer)) {
             writeLog(@"[PHOTOPROXY] Substituindo buffer na finalização da captura de foto");
             
+            // Transferir metadados críticos se existirem
+            if (photoSampleBuffer) {
+                @try {
+                    // Copiar timestamp de apresentação
+                    CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(photoSampleBuffer);
+                    CMTime duration = CMSampleBufferGetDuration(photoSampleBuffer);
+                    
+                    // Criar timing info baseado no buffer original
+                    CMSampleTimingInfo timing = {0};
+                    timing.duration = duration;
+                    timing.presentationTimeStamp = presentationTime;
+                    timing.decodeTimeStamp = kCMTimeInvalid;
+                    
+                    // Criar novo buffer com timing sincronizado
+                    CMSampleBufferRef syncedBuffer = NULL;
+                    OSStatus status = CMSampleBufferCreateCopyWithNewTiming(
+                        kCFAllocatorDefault,
+                        mjpegBuffer,
+                        1,
+                        &timing,
+                        &syncedBuffer
+                    );
+                    
+                    if (status == noErr && syncedBuffer != NULL) {
+                        // Liberar o buffer anterior
+                        CFRelease(mjpegBuffer);
+                        mjpegBuffer = syncedBuffer;
+                        
+                        // Copiar metadados importantes
+                        NSArray *metadataKeys = @[
+                            (id)CFSTR("VideoOrientation"),
+                            (id)CFSTR("{Exif}"),
+                            (id)CFSTR("{TIFF}"),
+                            (id)CFSTR("{DNG}"),
+                            (id)CFSTR("{GPS}")
+                        ];
+                        
+                        for (id key in metadataKeys) {
+                            CFTypeRef attachment = CMGetAttachment(photoSampleBuffer, (CFStringRef)key, NULL);
+                            if (attachment) {
+                                CMSetAttachment(mjpegBuffer, (CFStringRef)key,
+                                              attachment, kCMAttachmentMode_ShouldPropagate);
+                            }
+                        }
+                    }
+                } @catch (NSException *e) {
+                    writeLog(@"[PHOTOPROXY] Erro ao copiar metadados: %@", e);
+                }
+            }
+            
             [self.originalDelegate captureOutput:output
                 didFinishProcessingPhotoSampleBuffer:mjpegBuffer
                        previewPhotoSampleBuffer:previewPhotoSampleBuffer
                              resolvedSettings:resolvedSettings
                               bracketSettings:bracketSettings
                                        error:error];
+            
+            // Liberar o buffer MJPEG
+            CFRelease(mjpegBuffer);
         } else {
             [self.originalDelegate captureOutput:output
                 didFinishProcessingPhotoSampleBuffer:photoSampleBuffer
@@ -334,6 +494,12 @@ static BOOL gCaptureSystemActive = NO;
         // Como não podemos modificar o AVCapturePhoto diretamente,
         // apenas passamos para o delegate original
         [self.originalDelegate captureOutput:output didFinishProcessingPhoto:photo error:error];
+        
+        // Notificar que a foto foi capturada para liberar os recursos extras
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            g_isCapturingPhoto = NO;
+            writeLog(@"[PHOTOPROXY] Captura de foto concluída");
+        });
     }
 }
 
