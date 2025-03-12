@@ -29,6 +29,14 @@ void logDelegates(void);
 void detectCameraResolutions(void);
 
 // Nova função para mapeamento de orientação
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 UIImageOrientation getOrientationFromVideoOrientation(int videoOrientation);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* GLOBALS_H */

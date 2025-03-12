@@ -30,7 +30,7 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
 
 // Cache para processamento mais rápido
 @property (nonatomic, strong) NSCache *formatsCache;
-@property (nonatomic, strong) CVPixelBufferPoolRef pixelBufferPool;
+@property (nonatomic, assign) CVPixelBufferPoolRef pixelBufferPool;
 
 @end
 
@@ -591,17 +591,12 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
    CVPixelBufferRef pixelBuffer = NULL;
    CVReturn cvReturn = kCVReturnSuccess;
    
-   // Tentar usar um pool de pixel buffers para melhorar performance
-   if (self.pixelBufferPool == NULL ||
-       CVPixelBufferPoolGetWidth(self.pixelBufferPool) != size.width ||
-       CVPixelBufferPoolGetHeight(self.pixelBufferPool) != size.height) {
+   // Verificar se precisamos criar um novo pool
+   if (self.pixelBufferPool == NULL) {
+       // Criar uma variável local para o pool
+       CVPixelBufferPoolRef newPool = NULL;
        
        // Criar um novo pool com as dimensões corretas
-       if (self.pixelBufferPool) {
-           CVPixelBufferPoolRelease(self.pixelBufferPool);
-           self.pixelBufferPool = NULL;
-       }
-       
        NSDictionary *poolAttributes = @{
            (id)kCVPixelBufferPoolMinimumBufferCountKey: @(3)  // Manter pelo menos 3 buffers no pool
        };
@@ -618,12 +613,20 @@ static const NSUInteger kInitialBufferSize = 1024 * 1024; // 1MB
        cvReturn = CVPixelBufferPoolCreate(kCFAllocatorDefault,
                                        (__bridge CFDictionaryRef)poolAttributes,
                                        (__bridge CFDictionaryRef)pixelBufferAttributes,
-                                       &_pixelBufferPool);
+                                       &newPool);
        
        if (cvReturn != kCVReturnSuccess) {
            writeLog(@"[MJPEG] Falha ao criar pool de pixel buffers: %d", cvReturn);
            return NULL;
        }
+       
+       // Liberar o pool antigo se existir
+       if (self.pixelBufferPool) {
+           CVPixelBufferPoolRelease(self.pixelBufferPool);
+       }
+       
+       // Atribuir o novo pool
+       self.pixelBufferPool = newPool;
    }
    
    // Obter um buffer do pool

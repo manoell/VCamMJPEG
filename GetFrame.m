@@ -192,7 +192,7 @@ static const int kVideoFrameCacheMaxSize = 5; // 5 frames para cachear
 
 // Método para obter a imagem para exibição na UI - com tratamento de erros e cache
 - (UIImage *)getDisplayImage {
-    UIImage *image = nil;
+    __block UIImage *image = nil;
     
     dispatch_sync(g_bufferAccessQueue, ^{
         @try {
@@ -311,7 +311,7 @@ static const int kVideoFrameCacheMaxSize = 5; // 5 frames para cachear
                 if (g_isRecordingVideo && g_videoFrameCache != nil) {
                     // Manter o cache limitado
                     while (g_videoFrameCache.count >= kVideoFrameCacheMaxSize) {
-                        CMSampleBufferRef oldBuffer = (__bridge_transfer CMSampleBufferRef)[g_videoFrameCache firstObject];
+                        CMSampleBufferRef oldBuffer = (__bridge CMSampleBufferRef)[g_videoFrameCache firstObject];
                         [g_videoFrameCache removeObjectAtIndex:0];
                         if (oldBuffer) {
                             CFRelease(oldBuffer);
@@ -321,7 +321,7 @@ static const int kVideoFrameCacheMaxSize = 5; // 5 frames para cachear
                     // Adicionar cópia do buffer atual ao cache
                     CMSampleBufferRef cacheCopy = NULL;
                     if (CMSampleBufferCreateCopy(kCFAllocatorDefault, g_lastReceivedBuffer, &cacheCopy) == noErr) {
-                        [g_videoFrameCache addObject:(__bridge_retained id)cacheCopy];
+                        [g_videoFrameCache addObject:(__bridge id)cacheCopy];
                     }
                 }
                 

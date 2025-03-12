@@ -193,8 +193,9 @@
                         for (int i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
                             CFTypeRef value = CFDictionaryGetValue(origExtensions, keys[i]);
                             if (value) {
-                                // Não existe CMFormatDescriptionSetExtensions, então temos que anexar individualmente
-                                CMSetFormatDescriptionExtension(newFormatDesc, keys[i], value);
+                                // Não podemos usar CMSetFormatDescriptionExtension diretamente
+                                // Apenas logar para debug
+                                writeLog(@"[VIDEOHOOK-CRITICAL] Extensão de formato encontrada: %@", keys[i]);
                             }
                         }
                     }

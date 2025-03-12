@@ -71,7 +71,7 @@
     g_isRecordingVideo = NO;
     
     // Limpar quaisquer buffers temporários usados durante a gravação
-    [GetFrame flushVideoBuffers];
+    //[GetFrame flushVideoBuffers];
     
     // Verificar se há erro no arquivo final
     if (error) {
